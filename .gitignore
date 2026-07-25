@@ -1,0 +1,17 @@
+# secrets
+.streamlit/secrets.toml
+
+# local sqlite file, if ever used for local testing (production uses Turso)
+users.db
+
+# python cache
+__pycache__/
+*.pyc
+
+# virtual environment
+venv/
+.venv/
+
+# Windows junk
+Thumbs.db
+desktop.ini
