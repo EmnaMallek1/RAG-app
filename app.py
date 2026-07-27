@@ -16,9 +16,10 @@ import streamlit as st
 
 import rag_core as rc
 import auth
+import history
 
 st.set_page_config(
-    page_title="ML Papers RAG",
+    page_title="ML Research Assistant",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -28,21 +29,12 @@ st.set_page_config(
 # =========================================================
 # App-wide Groq API key — configured once by the app owner,
 # never entered by end users.
-#
-# Priority:
-#   1. Streamlit secrets  -> .streamlit/secrets.toml (local) or
-#      the "Secrets" panel in Streamlit Community Cloud (deployed).
-#   2. Environment variable GROQ_API_KEY (e.g. set in your shell,
-#      a .env file loaded before `streamlit run`, or your host's
-#      environment variable settings).
 # =========================================================
 def get_groq_api_key():
     try:
         if "GROQ_API_KEY" in st.secrets:
             return st.secrets["GROQ_API_KEY"]
     except Exception:
-        # st.secrets raises if no secrets.toml file exists at all — that's fine,
-        # it just means we fall back to the environment variable below.
         pass
     return os.environ.get("GROQ_API_KEY", "")
 
@@ -55,22 +47,47 @@ GROQ_API_KEY = get_groq_api_key()
 st.markdown(
     """
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
         html, body, [class*="css"] {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         }
 
-        #MainMenu, footer, header {visibility: hidden;}
+        #MainMenu, footer {visibility: hidden;}
 
         :root {
             --brand-primary: #4F46E5;
             --brand-primary-dark: #3730A3;
             --brand-bg: #F8F9FC;
+            --border-color: #E5E7EB;
+            --text-muted: #6B7280;
         }
 
         .stApp {
             background-color: var(--brand-bg);
+        }
+
+        /* Remove Streamlit's default extra bottom padding that leaves a
+           dead empty gap below the last element */
+        .block-container {
+            padding-top: 2rem;
+            padding-bottom: 1rem;
+            max-width: 1100px;
+        }
+
+        /* Fix the default white bar behind the chat input so it blends
+           with the app background instead of showing as a stray white
+           rectangle */
+        [data-testid="stChatInput"],
+        [data-testid="stBottomBlockContainer"] {
+            background: var(--brand-bg) !important;
+            border-top: none !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stChatInput"] textarea {
+            background: white !important;
+            border-radius: 12px !important;
+            border: 1px solid var(--border-color) !important;
         }
 
         .brand-header {
@@ -85,32 +102,47 @@ st.markdown(
             color: #1E1B4B;
         }
         .brand-subtitle {
-            color: #6B7280;
+            color: var(--text-muted);
             font-size: 0.92rem;
         }
 
+        /* Auth card — smaller, tighter, centered */
         .auth-card {
-            max-width: 420px;
-            margin: 3.5rem auto 0 auto;
-            padding: 2.25rem 2.25rem 1.75rem 2.25rem;
+            max-width: 340px;
+            margin: 1.5rem auto 0 auto;
+            padding: 1.5rem 1.5rem 1.25rem 1.5rem;
             background: white;
-            border-radius: 16px;
-            border: 1px solid #E5E7EB;
-            box-shadow: 0 4px 24px rgba(17, 24, 39, 0.06);
+            border-radius: 14px;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 4px 20px rgba(17, 24, 39, 0.06);
         }
         .auth-title {
             font-weight: 700;
-            font-size: 1.35rem;
+            font-size: 1.15rem;
             color: #111827;
-            margin-bottom: 0.15rem;
+            margin-bottom: 0.1rem;
         }
         .auth-subtitle {
-            color: #6B7280;
-            font-size: 0.9rem;
-            margin-bottom: 1.5rem;
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            margin-bottom: 1rem;
         }
 
-        div.stButton > button {
+        /* Tighter form field spacing inside the auth card */
+        .auth-card [data-testid="stTextInput"] {
+            margin-bottom: -0.6rem;
+        }
+        .auth-card [data-testid="stTextInput"] input {
+            border-radius: 8px !important;
+            padding: 0.45rem 0.7rem !important;
+            font-size: 0.9rem !important;
+        }
+        .auth-card [data-testid="stForm"] {
+            border: none !important;
+            padding: 0 !important;
+        }
+
+        div.stButton > button, div.stFormSubmitButton > button {
             border-radius: 8px;
             font-weight: 600;
             border: none;
@@ -118,15 +150,30 @@ st.markdown(
             color: white;
             transition: background-color 0.15s ease;
         }
-        div.stButton > button:hover {
+        div.stButton > button:hover, div.stFormSubmitButton > button:hover {
             background-color: var(--brand-primary-dark);
             color: white;
         }
 
+        /* Sidebar polish */
+        [data-testid="stSidebar"] {
+            background-color: #FFFFFF;
+            border-right: 1px solid var(--border-color);
+        }
+
+        /* Chat message bubbles */
+        [data-testid="stChatMessage"] {
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 0.75rem 1rem;
+            margin-bottom: 0.6rem;
+        }
+
         .source-card {
             padding: 0.85rem 1rem;
-            background: white;
-            border: 1px solid #E5E7EB;
+            background: #FAFAFC;
+            border: 1px solid var(--border-color);
             border-radius: 10px;
             margin-bottom: 0.6rem;
         }
@@ -139,6 +186,13 @@ st.markdown(
             font-size: 0.78rem;
             font-weight: 600;
         }
+
+        /* Expander polish */
+        [data-testid="stExpander"] {
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            background: white;
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -149,13 +203,27 @@ st.markdown(
 # Authentication gate
 # =========================================================
 def render_login_page():
+    # The login page never uses st.chat_input, so Streamlit's reserved
+    # bottom bar is just empty white space here — hide it completely.
     st.markdown(
         """
-        <div class="brand-header" style="justify-content:center; margin-top:2rem;">
-            <span style="font-size:2rem;">📚</span>
-            <span class="brand-title">ML Papers RAG</span>
+        <style>
+            [data-testid="stBottomBlockContainer"],
+            [data-testid="stBottom"] {
+                display: none !important;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div class="brand-header" style="justify-content:center; margin-top:1rem;">
+            <span style="font-size:1.8rem;">📚</span>
+            <span class="brand-title">ML Research Assistant</span>
         </div>
-        <div class="brand-subtitle" style="text-align:center;">
+        <div class="brand-subtitle" style="text-align:center; margin-bottom: 0.5rem;">
             Your research assistant for foundational machine learning papers
         </div>
         """,
@@ -234,7 +302,7 @@ with st.sidebar:
         <div class="brand-header">
             <span style="font-size:1.6rem;">📚</span>
             <div>
-                <div class="brand-title" style="font-size:1.15rem;">ML Papers RAG</div>
+                <div class="brand-title" style="font-size:1.15rem;">ML Research Assistant</div>
                 <div class="brand-subtitle">Research assistant for 26 foundational ML papers</div>
             </div>
         </div>
@@ -251,13 +319,6 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-
-    if GROQ_API_KEY:
-        st.caption("🟢 Groq API connected")
-    else:
-        st.caption("🔴 Groq API key not configured")
-
-    st.divider()
     top_k = st.slider("Number of sources to use", min_value=2, max_value=10, value=rc.FINAL_TOP_K)
 
     verify_answers = st.toggle(
@@ -269,45 +330,46 @@ with st.sidebar:
     )
 
     st.divider()
+    st.markdown('<div class="brand-title" style="font-size:0.95rem;">🕘 Conversations</div>', unsafe_allow_html=True)
+
+    if st.button("➕ New conversation", use_container_width=True):
+        st.session_state.conversation_id = None
+        st.session_state.messages = []
+        st.rerun()
+
+    past_conversations = history.list_conversations(st.session_state.user_email)
+    for conv in past_conversations:
+        is_active = conv["id"] == st.session_state.get("conversation_id")
+        label = ("🟢 " if is_active else "") + conv["title"]
+        if st.button(label, key=f"conv_{conv['id']}", use_container_width=True):
+            st.session_state.conversation_id = conv["id"]
+            st.session_state.messages = history.load_messages(conv["id"])
+            st.rerun()
+
+    st.divider()
     with st.expander("📄 Indexed papers"):
         for name in sorted(rc.PAPER_TITLES.values()):
             st.write(f"- {name}")
 
-    st.divider()
-    st.caption(
-        "⚠️ On first launch, the app downloads and indexes 26 PDFs "
-        "(~5-15 min depending on your connection). Subsequent launches are "
-        "nearly instant thanks to local caching."
-    )
-
 
 # =========================================================
-# Pipeline loading (cached — runs only once)
+# Pipeline loading (cached — runs only once, no visible logs)
 # =========================================================
 @st.cache_resource(show_spinner=False)
 def load_pipeline():
-    logs = []
-
     def log(msg):
-        logs.append(msg)
+        pass  # logs are intentionally discarded — no debug panel shown to users
 
     merged = rc.load_and_merge_documents(log=log)
     chunks = rc.build_chunks(merged, log=log)
     vectorstore = rc.build_vectorstore(chunks, log=log)
     reranker = rc.load_reranker(log=log)
 
-    return vectorstore, reranker, logs
+    return vectorstore, reranker
 
 
-status_placeholder = st.empty()
-with status_placeholder.container():
-    with st.spinner("Preparing the corpus (downloading / indexing on first launch)..."):
-        vectorstore, reranker, pipeline_logs = load_pipeline()
-status_placeholder.empty()
-
-with st.expander("🛠️ Pipeline preparation logs"):
-    for line in pipeline_logs:
-        st.text(line)
+with st.spinner("Preparing the corpus..."):
+    vectorstore, reranker = load_pipeline()
 
 
 # =========================================================
@@ -329,6 +391,8 @@ st.caption(
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "conversation_id" not in st.session_state:
+    st.session_state.conversation_id = None
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -359,7 +423,14 @@ if prompt:
             "variable) — see the comment at the top of app.py."
         )
     else:
+        # Start a new persisted conversation on the first message of a fresh chat
+        if st.session_state.conversation_id is None:
+            st.session_state.conversation_id = history.create_conversation(
+                st.session_state.user_email, title=prompt
+            )
+
         st.session_state.messages.append({"role": "user", "content": prompt})
+        history.save_message(st.session_state.conversation_id, "user", prompt)
         with st.chat_message("user"):
             st.markdown(prompt)
 
@@ -396,6 +467,7 @@ if prompt:
             "content": answer,
             "sources": sources,
         })
+        history.save_message(st.session_state.conversation_id, "assistant", answer, sources=sources)
 
 if not st.session_state.messages:
     st.info(
