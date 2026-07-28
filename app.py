@@ -410,11 +410,17 @@ for msg in st.session_state.messages:
         if msg.get("sources"):
             with st.expander(f"📎 {len(msg['sources'])} sources used"):
                 for s in msg["sources"]:
+                    pages_html = (
+                        f'<div style="color:var(--brand-primary-dark); font-size:0.78rem; '
+                        f'margin-top:0.3rem; font-weight:600;">📄 Pages: {s["pages_display"]}</div>'
+                        if s.get("pages_display") else ""
+                    )
                     st.markdown(
                         f"""
                         <div class="source-card">
                             <strong>{s['paper_name']}</strong>
                             <span class="source-score">relevance {s['score']:.3f}</span>
+                            {pages_html}
                             <div style="color:#6B7280; font-size:0.85rem; margin-top:0.4rem;">
                                 {s['excerpt']}…
                             </div>
@@ -459,11 +465,17 @@ if prompt:
             if sources:
                 with st.expander(f"📎 {len(sources)} sources used"):
                     for s in sources:
+                        pages_html = (
+                            f'<div style="color:var(--brand-primary-dark); font-size:0.78rem; '
+                            f'margin-top:0.3rem; font-weight:600;">📄 Pages: {s["pages_display"]}</div>'
+                            if s.get("pages_display") else ""
+                        )
                         st.markdown(
                             f"""
                             <div class="source-card">
                                 <strong>{s['paper_name']}</strong>
                                 <span class="source-score">relevance {s['score']:.3f}</span>
+                                {pages_html}
                                 <div style="color:#6B7280; font-size:0.85rem; margin-top:0.4rem;">
                                     {s['excerpt']}…
                                 </div>

@@ -30,6 +30,30 @@ MIN_CHUNK_CHARS = 80
 
 BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
 
+# =========================================================
+# Page tracking: invisible markers embedded during merging so page numbers
+# can be recovered after chunking, even though chunks no longer line up
+# with page boundaries. Uses U+2060 (WORD JOINER), an invisible character
+# that won't show up in rendered text and won't interfere with cleaning
+# regexes or the embedding/reranking models.
+# =========================================================
+_PAGE_MARKER_TEMPLATE = "\u2060PAGEMARK{page}\u2060"
+_PAGE_MARKER_PATTERN = re.compile(r"\u2060PAGEMARK(\d+)\u2060")
+
+
+def _insert_page_markers(pages):
+    """Joins a paper's per-page Documents into one string, with an invisible
+    page marker inserted right before each page's text."""
+    parts = []
+    for doc in pages:
+        page_number = doc.metadata.get("page", len(parts)) + 1  # 1-indexed, human-readable
+        parts.append(_PAGE_MARKER_TEMPLATE.format(page=page_number) + doc.page_content)
+    return "\n\n".join(parts)
+
+
+def _strip_page_markers(text):
+    return _PAGE_MARKER_PATTERN.sub("", text)
+
 URLS = [
     "https://arxiv.org/pdf/1706.03762.pdf",  # Attention Is All You Need
     "https://arxiv.org/pdf/1810.04805.pdf",  # BERT
@@ -205,7 +229,7 @@ def load_and_merge_documents(log=print):
 
     merged_documents = []
     for title, pages in pages_by_paper.items():
-        full_text = "\n\n".join(p.page_content for p in pages)
+        full_text = _insert_page_markers(pages)
         paper_name = pages[0].metadata.get("paper_name", title)
         merged_documents.append(Document(
             page_content=full_text,
@@ -279,6 +303,28 @@ def build_chunks(merged_documents, log=print):
 
     log(f"Oversized chunks re-split: {oversized_count}")
     log(f"Low-quality/noise chunks discarded: {dropped_count}")
+
+    # Recover each chunk's page number(s) from the invisible markers embedded
+    # during merging, then strip those markers out before the text is stored/
+    # embedded — they were only ever meant to survive long enough to be read
+    # back out here, not to appear in the actual indexed text.
+    current_page_by_title = {}
+    for chunk in chunks:
+        title = chunk.metadata.get("title")
+        marker_matches = list(_PAGE_MARKER_PATTERN.finditer(chunk.page_content))
+        if marker_matches:
+            page_start = int(marker_matches[0].group(1))
+            page_end = int(marker_matches[-1].group(1))
+            current_page_by_title[title] = page_end
+        else:
+            # No marker fell inside this chunk — it sits entirely within
+            # whichever page we last saw a marker for.
+            page_start = page_end = current_page_by_title.get(title)
+
+        chunk.metadata["page_start"] = page_start
+        chunk.metadata["page_end"] = page_end
+        chunk.page_content = _strip_page_markers(chunk.page_content).strip()
+
     log(f"Final chunk count: {len(chunks)}")
 
     with open(SEMANTIC_CHUNKS_PATH, "wb") as f:
@@ -403,6 +449,12 @@ Rules you MUST follow:
     a DIFFERENT paper, place that paper's citation once at the end of that new block, in the same
     way. If the whole answer only ever draws from one paper, this means the citation appears
     exactly once, at the very end of the answer.
+
+3c. Never write an inline attribution phrase like "as described in [Paper Name], ..." or "as
+    discussed in [Paper Name], ..." in the middle of a sentence. Always place the citation at the
+    END of the sentence or clause it supports, after the content, not interrupting it. Bad:
+    "QLoRA, as discussed in [Paper], builds upon LoRA by quantizing..." Good: "QLoRA builds upon
+    LoRA by quantizing the model to 4-bit precision [Paper]."
 
 4. Use Markdown formatting to aid readability: **bold** key terms or paper names, use bullet lists
    only per rule 2b. Never produce a sequence of disconnected, choppy sentences stitched from
@@ -539,19 +591,37 @@ def _collapse_repeated_citations(text: str) -> str:
     appears several times in a row with nothing else cited in between, only
     the LAST occurrence is kept and the earlier ones are stripped out. This
     is done in code rather than left to the LLM's prompt-following, since
-    that instruction alone doesn't get followed 100% of the time."""
+    that instruction alone doesn't get followed 100% of the time.
+
+    Only citations sitting at the true END of a sentence (immediately
+    followed by . ! ? or the end of the text) are ever removed — a citation
+    embedded mid-sentence (e.g. "as discussed in [X], builds upon...") is
+    left untouched, since removing it would break the sentence's grammar.
+    """
     matches = list(re.finditer(r"\[([^\]]+)\]", text))
     if len(matches) < 2:
         return text
 
+    def is_sentence_final(m):
+        idx = m.end()
+        while idx < len(text) and text[idx] == " ":
+            idx += 1
+        return idx >= len(text) or text[idx] in ".!?"
+
     remove_spans = []
     i = 0
     while i < len(matches):
+        if not is_sentence_final(matches[i]):
+            i += 1
+            continue
         j = i
-        while j + 1 < len(matches) and matches[j + 1].group(1) == matches[i].group(1):
+        while (
+            j + 1 < len(matches)
+            and matches[j + 1].group(1) == matches[i].group(1)
+            and is_sentence_final(matches[j + 1])
+        ):
             j += 1
         if j > i:
-            # A run of 2+ identical consecutive citations — keep only the last.
             for k in range(i, j):
                 remove_spans.append(matches[k].span())
         i = j + 1
@@ -569,6 +639,39 @@ def _collapse_repeated_citations(text: str) -> str:
     result = re.sub(r"\s+([.,;:])", r"\1", result)  # fix space-before-punctuation
     result = re.sub(r" {2,}", " ", result)           # collapse any double spaces
     return result
+
+
+def _build_sources(reranked_results, allowed_paper_names=None):
+    """Aggregates reranked chunks into one entry per distinct paper, merging
+    together the page numbers of every chunk retrieved for that paper."""
+    by_paper = {}
+    for doc, score in reranked_results:
+        paper_name = doc.metadata.get("paper_name", doc.metadata.get("title", "unknown"))
+        if allowed_paper_names is not None and paper_name not in allowed_paper_names:
+            continue
+
+        entry = by_paper.setdefault(paper_name, {
+            "paper_name": paper_name,
+            "score": float(score),
+            "excerpt": doc.page_content[:300],
+            "pages": set(),
+        })
+        entry["score"] = max(entry["score"], float(score))
+
+        page_start = doc.metadata.get("page_start")
+        page_end = doc.metadata.get("page_end")
+        if page_start is not None and page_end is not None:
+            entry["pages"].add(
+                str(page_start) if page_start == page_end else f"{page_start}\u2013{page_end}"
+            )
+
+    sources = []
+    for entry in by_paper.values():
+        pages_sorted = sorted(entry["pages"], key=lambda p: int(p.split("\u2013")[0]))
+        entry["pages_display"] = ", ".join(pages_sorted) if pages_sorted else None
+        del entry["pages"]
+        sources.append(entry)
+    return sources
 
 
 def generate_answer(query, vectorstore, reranker, llm, top_k=FINAL_TOP_K, verify=True):
@@ -610,31 +713,11 @@ Answer using only the context above, citing sources as [Paper Name]."""
         if f"[{paper_name}]" in final_answer:
             cited_paper_names.add(paper_name)
 
-    sources = []
-    seen_papers = set()
-    for doc, score in reranked_results:
-        paper_name = doc.metadata.get("paper_name", doc.metadata.get("title", "unknown"))
-        if cited_paper_names and paper_name not in cited_paper_names:
-            continue
-        if paper_name in seen_papers:
-            continue  # one entry per distinct paper, not per chunk
-        seen_papers.add(paper_name)
-        sources.append({
-            "paper_name": paper_name,
-            "score": float(score),
-            "excerpt": doc.page_content[:300],
-        })
+    sources = _build_sources(reranked_results, allowed_paper_names=cited_paper_names or None)
 
     # Fallback: if for some reason no citation matched literally (formatting drift),
     # don't silently show zero sources — fall back to the full retrieved set.
     if not sources:
-        sources = [
-            {
-                "paper_name": doc.metadata.get("paper_name", doc.metadata.get("title", "unknown")),
-                "score": float(score),
-                "excerpt": doc.page_content[:300],
-            }
-            for doc, score in reranked_results
-        ]
+        sources = _build_sources(reranked_results, allowed_paper_names=None)
 
     return final_answer, sources
