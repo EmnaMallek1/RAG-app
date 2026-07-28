@@ -341,10 +341,20 @@ with st.sidebar:
     for conv in past_conversations:
         is_active = conv["id"] == st.session_state.get("conversation_id")
         label = ("🟢 " if is_active else "") + conv["title"]
-        if st.button(label, key=f"conv_{conv['id']}", use_container_width=True):
-            st.session_state.conversation_id = conv["id"]
-            st.session_state.messages = history.load_messages(conv["id"])
-            st.rerun()
+
+        col_load, col_delete = st.columns([5, 1])
+        with col_load:
+            if st.button(label, key=f"conv_{conv['id']}", use_container_width=True):
+                st.session_state.conversation_id = conv["id"]
+                st.session_state.messages = history.load_messages(conv["id"])
+                st.rerun()
+        with col_delete:
+            if st.button("🗑", key=f"del_{conv['id']}", use_container_width=True):
+                history.delete_conversation(conv["id"])
+                if is_active:
+                    st.session_state.conversation_id = None
+                    st.session_state.messages = []
+                st.rerun()
 
     st.divider()
     with st.expander("📄 Indexed papers"):

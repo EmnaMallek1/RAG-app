@@ -365,30 +365,66 @@ RAG_SYSTEM_PROMPT = """You are a research assistant answering questions about ma
 writing for someone who wants to genuinely UNDERSTAND the concept, not just see a list of citations.
 
 Rules you MUST follow:
+
 1. Ground every factual claim in the provided context chunks. Do not use outside knowledge for
    facts, numbers, architectures, or results.
-2. Structure matters. Do not just concatenate fragments from different sources back to back.
-   For broad/conceptual questions (e.g. "what is an encoder?"):
-   a. Start with 1-2 plain-language sentences giving a general, unified explanation of the concept —
-      you MAY phrase this in your own words as long as it accurately reflects what the sources
-      collectively describe, without adding facts absent from them.
-   b. Then explain how it's implemented in each relevant paper as a Markdown bullet list, one
-      bullet per paper, formatted as: `- **Paper Name** — explanation [Paper Name]`
-      (bold the paper name at the start of the bullet, still include the [Paper Name] citation).
-   c. If sources define the term differently depending on context (e.g. NLP vs vision), say so
-      explicitly instead of blending them into one confusing sentence.
-   For narrow/factual questions with a single clear answer, plain prose is fine — only use the
-   bullet-per-paper structure when multiple papers/sources are being compared or listed.
-3. Use Markdown formatting to aid readability: **bold** key terms or paper names, use bullet lists
-   for multi-item or multi-paper answers. Never produce a sequence of disconnected, choppy
-   sentences stitched from different chunks.
-4. If the context does not contain enough information to answer, say so explicitly instead of guessing.
-5. If different chunks give conflicting information, point out the conflict rather than silently picking one.
-6. Always answer in the SAME language as the user's question, regardless of the language of the context chunks (which are in English). If the question is in French, answer in French; if in English, answer in English; etc.
-7. Never introduce specific examples, numbers, devices, hardware, or use cases that are not explicitly
+
+2. Structure depends on how many DISTINCT papers actually appear in the context, not how many
+   chunks were retrieved:
+   a. If the retrieved chunks come from a SINGLE paper (even if there are 5 chunks from it),
+      write in plain, flowing prose. Do NOT create one bullet per chunk — that produces
+      repetitive, padded-looking output. Synthesize the chunks into a single coherent
+      explanation, as if you were summarizing one paper's ideas, not listing sources.
+   b. Only use the bullet-per-paper structure when the context genuinely contains chunks from
+      MULTIPLE DIFFERENT papers and the question calls for comparing/listing them. In that case:
+      - Start with 1-2 plain-language sentences giving a general, unified explanation of the
+        concept — you MAY phrase this in your own words as long as it accurately reflects what
+        the sources collectively describe, without adding facts absent from them.
+      - Then one bullet per PAPER (never one bullet per chunk — merge multiple chunks from the
+        same paper into a single bullet), formatted EXACTLY like this:
+        `- **Paper Name** — explanation of that paper's contribution [Paper Name]`
+        Example: `- **LoRA: Low-Rank Adaptation of Large Language Models** — freezes the
+        pretrained weights and injects small trainable rank-decomposition matrices into each
+        layer, drastically cutting the number of trainable parameters [LoRA: Low-Rank Adaptation
+        of Large Language Models]`
+      - If sources define the term differently depending on context (e.g. NLP vs vision), say so
+        explicitly instead of blending them into one confusing sentence.
+   For narrow/factual questions with a single clear answer, plain prose is fine regardless of how
+   many chunks were retrieved.
+
+3. Citation format: cite ONLY as `[Paper Name]` — never `[Source N — Paper Name]`, never a bare
+   number, and never cite the same paper twice in the same sentence or bullet. One citation per
+   claim is enough.
+
+3b. Do not repeat the same paper's citation after every single sentence. Instead, group
+    consecutive sentences that draw from the same paper into one block, and place that paper's
+    citation ONCE, at the END of that block (after the last sentence belonging to it) — not at
+    the start, and not repeated mid-paragraph. If the answer then moves on to a claim grounded in
+    a DIFFERENT paper, place that paper's citation once at the end of that new block, in the same
+    way. If the whole answer only ever draws from one paper, this means the citation appears
+    exactly once, at the very end of the answer.
+
+4. Use Markdown formatting to aid readability: **bold** key terms or paper names, use bullet lists
+   only per rule 2b. Never produce a sequence of disconnected, choppy sentences stitched from
+   different chunks.
+
+5. If the context does not contain enough information to answer, say so explicitly instead of guessing.
+
+6. If different chunks give conflicting information, point out the conflict rather than silently picking one.
+
+7. Always answer in the SAME language as the user's question, regardless of the language of the context chunks (which are in English). If the question is in French, answer in French; if in English, answer in English; etc.
+
+8. Never introduce specific examples, numbers, devices, hardware, or use cases that are not explicitly
    stated in the context chunks. This restriction applies to concrete specifics only — it does NOT
    forbid you from explaining or paraphrasing the general concept clearly, per rule 2a.
-8. Be concise: clear and complete, but no generic filler or repetition.
+
+9. Mathematical formulas and equations MUST be written in LaTeX, wrapped in single dollar signs for
+   inline math (e.g. `$\\theta_{t+1} = \\theta_t - \\alpha \\cdot g_t$`) or double dollar signs for
+   standalone/display equations (e.g. `$$\\theta_{t+1} = \\theta_t - \\frac{\\alpha}{\\sqrt{v_t} + \\epsilon} m_t$$`).
+   Never write formulas as plain unformatted text with concatenated symbols — always use proper
+   LaTeX subscript (`_`), superscript (`^`), and fraction (`\\frac{}{}`) notation.
+
+10. Be concise: clear and complete, but no generic filler or repetition.
 """
 
 
@@ -430,25 +466,49 @@ Your job: check every SPECIFIC claim (a fact, example, number, device, use case,
 architectural detail) against the source excerpts, and rewrite the answer accordingly.
 
 Rules you MUST follow:
+
 1. If a specific claim is NOT explicitly and literally supported by the source excerpts, REMOVE it
    or rephrase it to only state what IS explicitly supported. Do not soften it into a hedge like
    "possibly" — just remove unsupported specifics.
+
 2. Do NOT remove or flag general, unifying explanatory sentences (e.g. "an encoder is a component
    that transforms an input into a representation") as long as they are a fair, accurate summary of
    what the sources collectively describe — these are not "unsupported claims", they are legitimate
    synthesis. Only strip out concrete specifics that have no basis in the text.
-3. Preserve the structure and formatting of the draft: if it opens with a general explanation
-   followed by a Markdown bullet list (one bullet per paper, paper name in bold), keep that
-   structure and formatting intact. Do not turn it into a disconnected list of fragments, and do
-   not strip out Markdown formatting (bold, bullets) that was already there.
-4. Do not add any new information that wasn't in the draft or the sources.
-5. Keep the citation format [Paper Name] for every specific claim that remains.
-6. Keep the same language as the draft answer (do not translate it).
-7. Keep the answer concise and technical — do not pad it, but do not make it choppy either.
-8. If, after removing unsupported specifics, the answer becomes empty or too thin, say explicitly
+
+3. Preserve the structure and formatting of the draft: if it's plain prose, keep it as plain prose.
+   If it opens with a general explanation followed by a Markdown bullet list (one bullet PER PAPER,
+   paper name in bold), keep that structure and formatting intact. Do not turn a single-paper
+   plain-prose answer into a bulleted list, and do not turn a legitimate multi-paper bullet list
+   into a disconnected list of fragments. Do not strip out Markdown formatting (bold, bullets)
+   that was already there.
+
+4. Citation format: every citation must read exactly `[Paper Name]` — never `[Source N — Paper
+   Name]`. If the draft cites the same paper twice in one sentence or bullet, remove the duplicate
+   and keep only one citation for that claim.
+
+4b. Citations belong at the END of a block of consecutive sentences drawn from the same paper —
+    not repeated after each sentence, and not placed at the start of the block. If the draft
+    already places a citation after every sentence for the same paper, collapse those into a
+    single citation at the end of that block. If the whole answer only cites one paper, it should
+    appear exactly once, at the very end of the answer. Do NOT collapse citations that belong to
+    genuinely different papers — each distinct paper still gets its own citation at the end of
+    its own block.
+
+5. Preserve any LaTeX math formatting exactly as given (`$...$` or `$$...$$`). Do not convert
+   equations into plain text, and do not strip the dollar-sign delimiters.
+
+6. Do not add any new information that wasn't in the draft or the sources.
+
+7. Keep the same language as the draft answer (do not translate it).
+
+8. Keep the answer concise and technical — do not pad it, but do not make it choppy either.
+
+9. If, after removing unsupported specifics, the answer becomes empty or too thin, say explicitly
    that the sources don't fully support a detailed answer, rather than inventing filler.
-9. Output ONLY the corrected answer text. No preamble, no explanation of what you changed, no
-   meta-commentary.
+
+10. Output ONLY the corrected answer text. No preamble, no explanation of what you changed, no
+    meta-commentary.
 """
 
 
@@ -472,6 +532,43 @@ Rewrite the draft answer following your fact-checking rules."""
     ])
 
     return response.content
+
+
+def _collapse_repeated_citations(text: str) -> str:
+    """Removes redundant repeated citations. If the same [Paper Name] citation
+    appears several times in a row with nothing else cited in between, only
+    the LAST occurrence is kept and the earlier ones are stripped out. This
+    is done in code rather than left to the LLM's prompt-following, since
+    that instruction alone doesn't get followed 100% of the time."""
+    matches = list(re.finditer(r"\[([^\]]+)\]", text))
+    if len(matches) < 2:
+        return text
+
+    remove_spans = []
+    i = 0
+    while i < len(matches):
+        j = i
+        while j + 1 < len(matches) and matches[j + 1].group(1) == matches[i].group(1):
+            j += 1
+        if j > i:
+            # A run of 2+ identical consecutive citations — keep only the last.
+            for k in range(i, j):
+                remove_spans.append(matches[k].span())
+        i = j + 1
+
+    if not remove_spans:
+        return text
+
+    result = text
+    for start, end in sorted(remove_spans, reverse=True):
+        s = start
+        if s > 0 and result[s - 1] == " ":
+            s -= 1  # also eat the space before it, avoid a double space
+        result = result[:s] + result[end:]
+
+    result = re.sub(r"\s+([.,;:])", r"\1", result)  # fix space-before-punctuation
+    result = re.sub(r" {2,}", " ", result)           # collapse any double spaces
+    return result
 
 
 def generate_answer(query, vectorstore, reranker, llm, top_k=FINAL_TOP_K, verify=True):
@@ -502,12 +599,42 @@ Answer using only the context above, citing sources as [Paper Name]."""
     if verify:
         final_answer = verify_and_correct_answer(final_answer, context, llm)
 
-    sources = []
+    final_answer = _collapse_repeated_citations(final_answer)
+
+    # Only report sources whose paper actually got cited (as "[Paper Name]") in the
+    # final answer — otherwise this always shows top_k regardless of what the model
+    # actually used, which is misleading (e.g. "5 sources used" for a single-paper answer).
+    cited_paper_names = set()
     for doc, score in reranked_results:
+        paper_name = doc.metadata.get("paper_name", doc.metadata.get("title", "unknown"))
+        if f"[{paper_name}]" in final_answer:
+            cited_paper_names.add(paper_name)
+
+    sources = []
+    seen_papers = set()
+    for doc, score in reranked_results:
+        paper_name = doc.metadata.get("paper_name", doc.metadata.get("title", "unknown"))
+        if cited_paper_names and paper_name not in cited_paper_names:
+            continue
+        if paper_name in seen_papers:
+            continue  # one entry per distinct paper, not per chunk
+        seen_papers.add(paper_name)
         sources.append({
-            "paper_name": doc.metadata.get("paper_name", doc.metadata.get("title", "unknown")),
+            "paper_name": paper_name,
             "score": float(score),
             "excerpt": doc.page_content[:300],
         })
+
+    # Fallback: if for some reason no citation matched literally (formatting drift),
+    # don't silently show zero sources — fall back to the full retrieved set.
+    if not sources:
+        sources = [
+            {
+                "paper_name": doc.metadata.get("paper_name", doc.metadata.get("title", "unknown")),
+                "score": float(score),
+                "excerpt": doc.page_content[:300],
+            }
+            for doc, score in reranked_results
+        ]
 
     return final_answer, sources

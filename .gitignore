@@ -15,3 +15,5 @@ venv/
 # Windows junk
 Thumbs.db
 desktop.ini
+
+check_users.py
