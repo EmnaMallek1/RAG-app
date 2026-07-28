@@ -11,6 +11,7 @@ app.py (Streamlit) imports this module and only handles the UI.
 import os
 import re
 import pickle
+import shutil
 from collections import defaultdict, Counter
 
 from langchain_community.document_loaders import PyPDFLoader
@@ -29,6 +30,16 @@ MAX_CHUNK_CHARS = 2000
 MIN_CHUNK_CHARS = 80
 
 BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
+
+# =========================================================
+# Hugging Face Hub — prebuilt index storage
+# =========================================================
+# Public dataset repo where the final chroma_db/ + pickle caches are
+# uploaded once (via upload_to_hf.py) so that cold starts on Streamlit
+# Cloud (or any fresh container) can download a ready-made index instead
+# of rebuilding it from the 26 source PDFs every time.
+HF_REPO_ID = "yourname/ml-rag-index"   # <-- change to your actual HF username/repo
+HF_REPO_TYPE = "dataset"
 
 # =========================================================
 # Page tracking: invisible markers embedded during merging so page numbers
@@ -178,6 +189,72 @@ def is_low_quality_chunk(text):
         return True
 
     return False
+
+
+# =========================================================
+# Hugging Face Hub — download prebuilt assets on cold start
+# =========================================================
+def ensure_prebuilt_assets(log=print):
+    """
+    Cold-start helper: if the local chroma_db/ folder and pickle caches are
+    missing (e.g. a fresh Streamlit Cloud container after a restart or
+    redeploy), download the prebuilt versions from the Hugging Face Hub
+    dataset repo instead of rebuilding the whole pipeline from the 26
+    source PDFs.
+
+    Safe to call every time: it's a no-op if the files are already present
+    locally (e.g. on your own machine during development, or if a previous
+    call already downloaded them into this same container).
+    """
+    needs_vectorstore = not os.path.exists(VECTORSTORE_DIR)
+    needs_documents_pkl = not os.path.exists(PICKLE_PATH)
+    needs_chunks_pkl = not os.path.exists(SEMANTIC_CHUNKS_PATH)
+
+    if not (needs_vectorstore or needs_documents_pkl or needs_chunks_pkl):
+        log("Prebuilt assets already present locally — skipping HF download.")
+        return
+
+    try:
+        from huggingface_hub import snapshot_download, hf_hub_download
+    except ImportError:
+        log("huggingface_hub not installed — cannot fetch prebuilt assets, "
+            "falling back to building from scratch.")
+        return
+
+    try:
+        if needs_vectorstore:
+            log(f"Downloading prebuilt vector store from {HF_REPO_ID} ...")
+            snapshot_path = snapshot_download(
+                repo_id=HF_REPO_ID,
+                repo_type=HF_REPO_TYPE,
+                allow_patterns=["chroma_db/*"],
+            )
+            downloaded_chroma_dir = os.path.join(snapshot_path, "chroma_db")
+            if os.path.isdir(downloaded_chroma_dir):
+                shutil.copytree(downloaded_chroma_dir, VECTORSTORE_DIR)
+                log("Vector store downloaded and ready.")
+
+        if needs_documents_pkl:
+            log("Downloading all_documents.pkl ...")
+            downloaded = hf_hub_download(
+                repo_id=HF_REPO_ID, repo_type=HF_REPO_TYPE,
+                filename="all_documents.pkl",
+            )
+            shutil.copy(downloaded, PICKLE_PATH)
+
+        if needs_chunks_pkl:
+            log("Downloading semantic_chunks.pkl ...")
+            downloaded = hf_hub_download(
+                repo_id=HF_REPO_ID, repo_type=HF_REPO_TYPE,
+                filename="semantic_chunks.pkl",
+            )
+            shutil.copy(downloaded, SEMANTIC_CHUNKS_PATH)
+
+        log("Prebuilt assets ready — pipeline will load them instead of rebuilding.")
+
+    except Exception as e:
+        log(f"Could not download prebuilt assets from Hugging Face Hub: {e}. "
+            "Falling back to building from scratch (slower cold start).")
 
 
 # =========================================================
@@ -365,7 +442,21 @@ def build_vectorstore(chunks, log=print):
             persist_directory=VECTORSTORE_DIR,
             embedding_function=embedding_model,
         )
-        log(f"Vector store loaded. Entry count: {vectorstore._collection.count()}")
+        try:
+            count = vectorstore._collection.count()
+            if count == 0:
+                raise ValueError("vector store loaded but contains 0 entries")
+            log(f"Vector store loaded. Entry count: {count}")
+        except Exception as e:
+            log(f"Existing vector store looks corrupted/empty ({e}) — "
+                f"deleting and rebuilding from chunks.")
+            shutil.rmtree(VECTORSTORE_DIR, ignore_errors=True)
+            vectorstore = Chroma.from_documents(
+                documents=chunks,
+                embedding=embedding_model,
+                persist_directory=VECTORSTORE_DIR,
+            )
+            log(f"Vector store rebuilt and saved to '{VECTORSTORE_DIR}'.")
     else:
         log(f"No vector store found — embedding {len(chunks)} chunks (this can take a while)...")
         vectorstore = Chroma.from_documents(

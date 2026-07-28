@@ -25,3 +25,5 @@ safetensors==0.8.0
 groq==0.37.1
 
 turso-python
+
+huggingface_hub

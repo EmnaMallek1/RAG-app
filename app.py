@@ -370,6 +370,7 @@ def load_pipeline():
     def log(msg):
         pass  # logs are intentionally discarded — no debug panel shown to users
 
+    rc.ensure_prebuilt_assets(log=log)  # try the HF Hub prebuilt index first
     merged = rc.load_and_merge_documents(log=log)
     chunks = rc.build_chunks(merged, log=log)
     vectorstore = rc.build_vectorstore(chunks, log=log)
