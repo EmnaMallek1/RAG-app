@@ -38,7 +38,7 @@ BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages
 # uploaded once (via upload_to_hf.py) so that cold starts on Streamlit
 # Cloud (or any fresh container) can download a ready-made index instead
 # of rebuilding it from the 26 source PDFs every time.
-HF_REPO_ID = "yourname/ml-rag-index"   # <-- change to your actual HF username/repo
+HF_REPO_ID = "EmnaMALLEK/rag-app"
 HF_REPO_TYPE = "dataset"
 
 # =========================================================
@@ -571,23 +571,53 @@ Rules you MUST follow:
 """
 
 
-def load_llm(api_key=None):
+# =========================================================
+# Multi-key Groq fallback
+# ---------------------------------------------------------
+# Groq's free tier has a daily token cap per account. Instead of a single
+# hard-coded LLM client, we now accept a LIST of API keys and try them in
+# order, moving on to the next key whenever the current one comes back
+# rate-limited (HTTP 429). This spreads usage across several free-tier
+# accounts instead of failing outright once one account's quota is hit.
+# =========================================================
+def _is_rate_limit_error(e):
+    msg = str(e)
+    return "rate_limit_exceeded" in msg or "429" in msg or "rate limit" in msg.lower()
+
+
+def _invoke_with_fallback(messages, api_keys, log=print):
+    """Tries each Groq API key in turn. If a key is rate-limited (429),
+    moves on to the next one instead of failing the whole request.
+    Any non-rate-limit error is raised immediately (no point retrying
+    a different key for e.g. a malformed request)."""
     from langchain_groq import ChatGroq
 
-    if api_key:
-        os.environ["GROQ_API_KEY"] = api_key
-
-    if not os.environ.get("GROQ_API_KEY"):
+    if not api_keys:
         raise ValueError(
-            "No GROQ_API_KEY set. Get a free key at "
+            "No GROQ_API_KEY configured. Get a free key at "
             "https://console.groq.com/keys"
         )
 
-    return ChatGroq(
-        model="llama-3.3-70b-versatile",
-        temperature=0,
-        max_tokens=1024,
-    )
+    last_error = None
+    for i, key in enumerate(api_keys):
+        try:
+            llm = ChatGroq(
+                model="llama-3.3-70b-versatile",
+                temperature=0,
+                max_tokens=1024,
+                groq_api_key=key,
+            )
+            response = llm.invoke(messages)
+            return response.content
+        except Exception as e:
+            last_error = e
+            if _is_rate_limit_error(e):
+                log(f"Key #{i + 1} rate-limited — trying next key...")
+                continue
+            raise  # non-rate-limit errors surface immediately, no point retrying
+
+    # every key was rate-limited
+    raise last_error
 
 
 def format_context(reranked_results):
@@ -655,7 +685,7 @@ Rules you MUST follow:
 """
 
 
-def verify_and_correct_answer(draft_answer, context, llm):
+def verify_and_correct_answer(draft_answer, context, api_keys, log=print):
     """Second LLM pass: re-reads the generated answer against the full
     source excerpts and removes/rewrites any claim not literally grounded
     in the context (e.g. invented examples or details)."""
@@ -669,12 +699,10 @@ Draft answer to fact-check:
 
 Rewrite the draft answer following your fact-checking rules."""
 
-    response = llm.invoke([
+    return _invoke_with_fallback([
         ("system", VERIFICATION_SYSTEM_PROMPT),
         ("user", verification_message),
-    ])
-
-    return response.content
+    ], api_keys, log=log)
 
 
 def _collapse_repeated_citations(text: str) -> str:
@@ -765,8 +793,10 @@ def _build_sources(reranked_results, allowed_paper_names=None):
     return sources
 
 
-def generate_answer(query, vectorstore, reranker, llm, top_k=FINAL_TOP_K, verify=True):
+def generate_answer(query, vectorstore, reranker, api_keys, top_k=FINAL_TOP_K, verify=True, log=print):
     """Full retrieve -> rerank -> generate -> (verify/correct) pipeline.
+    `api_keys` is a list of Groq API keys tried in order, falling back to
+    the next one whenever the current one is rate-limited.
     Returns (answer_text, list_of_sources_with_excerpts)."""
     reranked_results = retrieve_and_rerank(query, vectorstore, reranker, top_k=top_k)
 
@@ -783,15 +813,13 @@ Question: {query}
 
 Answer using only the context above, citing sources as [Paper Name]."""
 
-    response = llm.invoke([
+    final_answer = _invoke_with_fallback([
         ("system", RAG_SYSTEM_PROMPT),
         ("user", user_message),
-    ])
-
-    final_answer = response.content
+    ], api_keys, log=log)
 
     if verify:
-        final_answer = verify_and_correct_answer(final_answer, context, llm)
+        final_answer = verify_and_correct_answer(final_answer, context, api_keys, log=log)
 
     final_answer = _collapse_repeated_citations(final_answer)
 

@@ -27,19 +27,47 @@ st.set_page_config(
 
 
 # =========================================================
-# App-wide Groq API key — configured once by the app owner,
+# App-wide Groq API keys — configured once by the app owner,
 # never entered by end users.
+#
+# Supports multiple keys (e.g. several free-tier accounts) so that if one
+# key hits its daily rate limit, the app automatically falls back to the
+# next one instead of failing. Add as many as you like in secrets.toml as
+# GROQ_API_KEY, GROQ_API_KEY_2, GROQ_API_KEY_3, ... (any number, any names
+# following that pattern work).
 # =========================================================
-def get_groq_api_key():
+def get_groq_api_keys():
+    keys = []
+
+    # Collect from st.secrets (GROQ_API_KEY, GROQ_API_KEY_2, GROQ_API_KEY_3, ...)
     try:
-        if "GROQ_API_KEY" in st.secrets:
-            return st.secrets["GROQ_API_KEY"]
+        for key_name in st.secrets.keys():
+            if key_name == "GROQ_API_KEY" or key_name.startswith("GROQ_API_KEY_"):
+                val = st.secrets[key_name]
+                if val:
+                    keys.append(val)
     except Exception:
         pass
-    return os.environ.get("GROQ_API_KEY", "")
+
+    # Also collect from environment variables, same naming pattern
+    for key_name in ["GROQ_API_KEY", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "GROQ_API_KEY_4",
+                      "GROQ_API_KEY_5"]:
+        val = os.environ.get(key_name)
+        if val:
+            keys.append(val)
+
+    # De-duplicate while preserving order
+    seen = set()
+    unique_keys = []
+    for k in keys:
+        if k and k not in seen:
+            unique_keys.append(k)
+            seen.add(k)
+
+    return unique_keys
 
 
-GROQ_API_KEY = get_groq_api_key()
+GROQ_API_KEYS = get_groq_api_keys()
 
 # =========================================================
 # Global styling — professional look & feel
@@ -433,11 +461,12 @@ for msg in st.session_state.messages:
 prompt = st.chat_input("E.g. How does the attention mechanism work in the Transformer?")
 
 if prompt:
-    if not GROQ_API_KEY:
+    if not GROQ_API_KEYS:
         st.error(
             "⚠️ No Groq API key is configured for this app. The app owner needs to "
-            "set GROQ_API_KEY in `.streamlit/secrets.toml` (or as an environment "
-            "variable) — see the comment at the top of app.py."
+            "set GROQ_API_KEY (and optionally GROQ_API_KEY_2, GROQ_API_KEY_3, ...) in "
+            "`.streamlit/secrets.toml` (or as environment variables) — see the comment "
+            "at the top of app.py."
         )
     else:
         # Start a new persisted conversation on the first message of a fresh chat
@@ -454,9 +483,9 @@ if prompt:
         with st.chat_message("assistant"):
             with st.spinner("Searching the corpus and generating the answer..."):
                 try:
-                    llm = rc.load_llm(api_key=GROQ_API_KEY)
                     answer, sources = rc.generate_answer(
-                        prompt, vectorstore, reranker, llm, top_k=top_k, verify=verify_answers
+                        prompt, vectorstore, reranker, GROQ_API_KEYS,
+                        top_k=top_k, verify=verify_answers,
                     )
                 except Exception as e:
                     answer = f"❌ Error while generating the answer: {e}"
