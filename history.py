@@ -2,11 +2,12 @@
 history.py
 ----------
 Persists chat conversations per user in Turso, so users see their past
-conversations again after logging back in.
+conversations again after logging back in. Also stores per-message
+feedback (👍/👎) so the app owner can see which answers were rated helpful.
 
 Two tables:
 - conversations(id, user_email, title, created_at)
-- chat_messages(id, conversation_id, role, content, sources, created_at)
+- chat_messages(id, conversation_id, role, content, sources, feedback, created_at)
 
 Uses the same low-level approach as auth.py: talks to TursoConnection
 directly with plain SQL rather than the buggy TursoCRUD/TursoSchemaManager
@@ -75,10 +76,18 @@ def _ensure_tables():
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             sources TEXT,
+            feedback TEXT,
             created_at TEXT NOT NULL
         )
         """
     )
+    # If the table already existed from before this feature was added, add the
+    # column defensively — ALTER TABLE has no "IF NOT EXISTS" for columns, so
+    # swallow the error if it's already there.
+    try:
+        conn.execute_query("ALTER TABLE chat_messages ADD COLUMN feedback TEXT")
+    except Exception:
+        pass
     _TABLES_READY = True
 
 
@@ -97,17 +106,30 @@ def create_conversation(user_email: str, title: str) -> str:
     return conversation_id
 
 
-def save_message(conversation_id: str, role: str, content: str, sources=None):
-    """Appends a single message to a conversation."""
+def save_message(conversation_id: str, role: str, content: str, sources=None) -> str:
+    """Appends a single message to a conversation. Returns the new message's id
+    so the caller can later attach feedback to it."""
     _ensure_tables()
     conn = _get_connection()
 
+    message_id = str(uuid.uuid4())
     sources_json = json.dumps(sources) if sources else None
 
     conn.execute_query(
         "INSERT INTO chat_messages (id, conversation_id, role, content, sources, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        [str(uuid.uuid4()), conversation_id, role, content, sources_json, str(time.time())],
+        [message_id, conversation_id, role, content, sources_json, str(time.time())],
+    )
+    return message_id
+
+
+def set_message_feedback(message_id: str, feedback: str):
+    """Records feedback ('up' or 'down') for a single message."""
+    _ensure_tables()
+    conn = _get_connection()
+    conn.execute_query(
+        "UPDATE chat_messages SET feedback = ? WHERE id = ?",
+        [feedback, message_id],
     )
 
 
@@ -128,13 +150,13 @@ def list_conversations(user_email: str) -> list[dict]:
 
 def load_messages(conversation_id: str) -> list[dict]:
     """Returns all messages in a conversation, in order, with sources
-    parsed back into Python objects."""
+    parsed back into Python objects and any existing feedback included."""
     _ensure_tables()
     conn = _get_connection()
 
     rows = _parse_rows(
         conn.execute_query(
-            "SELECT role, content, sources FROM chat_messages "
+            "SELECT id, role, content, sources, feedback FROM chat_messages "
             "WHERE conversation_id = ? ORDER BY created_at ASC",
             [conversation_id],
         )
@@ -144,9 +166,11 @@ def load_messages(conversation_id: str) -> list[dict]:
     for row in rows:
         sources = json.loads(row["sources"]) if row.get("sources") else []
         messages.append({
+            "id": row["id"],
             "role": row["role"],
             "content": row["content"],
             "sources": sources,
+            "feedback": row.get("feedback"),
         })
     return messages
 

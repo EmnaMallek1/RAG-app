@@ -84,8 +84,8 @@ st.markdown(
         #MainMenu, footer {visibility: hidden;}
 
         :root {
-            --brand-primary: #4F46E5;
-            --brand-primary-dark: #3730A3;
+            --brand-primary: #6B7280;
+            --brand-primary-dark: #4B5563;
             --brand-bg: #F8F9FC;
             --border-color: #E5E7EB;
             --text-muted: #6B7280;
@@ -360,29 +360,30 @@ with st.sidebar:
     st.divider()
     st.markdown('<div class="brand-title" style="font-size:0.95rem;">🕘 Conversations</div>', unsafe_allow_html=True)
 
-    if st.button("➕ New conversation", use_container_width=True):
-        st.session_state.conversation_id = None
-        st.session_state.messages = []
-        st.rerun()
+    with st.container(key="sidebar_history"):
+        if st.button("➕ New conversation", use_container_width=True):
+            st.session_state.conversation_id = None
+            st.session_state.messages = []
+            st.rerun()
 
-    past_conversations = history.list_conversations(st.session_state.user_email)
-    for conv in past_conversations:
-        is_active = conv["id"] == st.session_state.get("conversation_id")
-        label = ("🟢 " if is_active else "") + conv["title"]
+        past_conversations = history.list_conversations(st.session_state.user_email)
+        for conv in past_conversations:
+            is_active = conv["id"] == st.session_state.get("conversation_id")
+            label = ("🟢 " if is_active else "") + conv["title"]
 
-        col_load, col_delete = st.columns([5, 1])
-        with col_load:
-            if st.button(label, key=f"conv_{conv['id']}", use_container_width=True):
-                st.session_state.conversation_id = conv["id"]
-                st.session_state.messages = history.load_messages(conv["id"])
-                st.rerun()
-        with col_delete:
-            if st.button("🗑", key=f"del_{conv['id']}", use_container_width=True):
-                history.delete_conversation(conv["id"])
-                if is_active:
-                    st.session_state.conversation_id = None
-                    st.session_state.messages = []
-                st.rerun()
+            col_load, col_delete = st.columns([5, 1])
+            with col_load:
+                if st.button(label, key=f"conv_{conv['id']}", use_container_width=True):
+                    st.session_state.conversation_id = conv["id"]
+                    st.session_state.messages = history.load_messages(conv["id"])
+                    st.rerun()
+            with col_delete:
+                if st.button("🗑", key=f"del_{conv['id']}", use_container_width=True):
+                    history.delete_conversation(conv["id"])
+                    if is_active:
+                        st.session_state.conversation_id = None
+                        st.session_state.messages = []
+                    st.rerun()
 
     st.divider()
     with st.expander("📄 Indexed papers"):
@@ -433,30 +434,63 @@ if "messages" not in st.session_state:
 if "conversation_id" not in st.session_state:
     st.session_state.conversation_id = None
 
+
+def render_feedback_buttons(msg):
+    """Shows thumbs up/down for an assistant message, or a confirmation
+    once feedback has already been given for it."""
+    message_id = msg.get("id")
+    if not message_id:
+        return  # message wasn't persisted (e.g. an error message), nothing to attach feedback to
+
+    current = msg.get("feedback")
+    if current:
+        label = "👍 Marked helpful" if current == "up" else "👎 Marked not helpful"
+        st.caption(label)
+        return
+
+    col_up, col_down, _ = st.columns([1, 1, 8])
+    with col_up:
+        if st.button("👍", key=f"up_{message_id}"):
+            history.set_message_feedback(message_id, "up")
+            msg["feedback"] = "up"
+            st.rerun()
+    with col_down:
+        if st.button("👎", key=f"down_{message_id}"):
+            history.set_message_feedback(message_id, "down")
+            msg["feedback"] = "down"
+            st.rerun()
+
+
+def render_sources(sources):
+    with st.expander(f"📎 {len(sources)} sources used"):
+        for s in sources:
+            badge = f"[{s['number']}]" if s.get("number") else f"#{sources.index(s) + 1}"
+            pages_html = (
+                f'<div style="color:var(--brand-primary-dark); font-size:0.78rem; '
+                f'margin-top:0.3rem; font-weight:600;">📄 Pages: {s["pages_display"]}</div>'
+                if s.get("pages_display") else ""
+            )
+            st.markdown(
+                f"""
+                <div class="source-card">
+                    <strong>{badge} {s['paper_name']}</strong>
+                    {pages_html}
+                    <div style="color:#6B7280; font-size:0.85rem; margin-top:0.4rem;">
+                        {s['excerpt']}…
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if msg.get("sources"):
-            with st.expander(f"📎 {len(msg['sources'])} sources used"):
-                for s in msg["sources"]:
-                    pages_html = (
-                        f'<div style="color:var(--brand-primary-dark); font-size:0.78rem; '
-                        f'margin-top:0.3rem; font-weight:600;">📄 Pages: {s["pages_display"]}</div>'
-                        if s.get("pages_display") else ""
-                    )
-                    st.markdown(
-                        f"""
-                        <div class="source-card">
-                            <strong>{s['paper_name']}</strong>
-                            <span class="source-score">relevance {s['score']:.3f}</span>
-                            {pages_html}
-                            <div style="color:#6B7280; font-size:0.85rem; margin-top:0.4rem;">
-                                {s['excerpt']}…
-                            </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+            render_sources(msg["sources"])
+        if msg["role"] == "assistant":
+            render_feedback_buttons(msg)
 
 prompt = st.chat_input("E.g. How does the attention mechanism work in the Transformer?")
 
@@ -475,8 +509,12 @@ if prompt:
                 st.session_state.user_email, title=prompt
             )
 
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        history.save_message(st.session_state.conversation_id, "user", prompt)
+        user_message_id = history.save_message(
+            st.session_state.conversation_id, "user", prompt
+        )
+        st.session_state.messages.append({
+            "role": "user", "content": prompt, "id": user_message_id,
+        })
         with st.chat_message("user"):
             st.markdown(prompt)
 
@@ -492,34 +530,23 @@ if prompt:
                     sources = []
 
             st.markdown(answer)
-            if sources:
-                with st.expander(f"📎 {len(sources)} sources used"):
-                    for s in sources:
-                        pages_html = (
-                            f'<div style="color:var(--brand-primary-dark); font-size:0.78rem; '
-                            f'margin-top:0.3rem; font-weight:600;">📄 Pages: {s["pages_display"]}</div>'
-                            if s.get("pages_display") else ""
-                        )
-                        st.markdown(
-                            f"""
-                            <div class="source-card">
-                                <strong>{s['paper_name']}</strong>
-                                <span class="source-score">relevance {s['score']:.3f}</span>
-                                {pages_html}
-                                <div style="color:#6B7280; font-size:0.85rem; margin-top:0.4rem;">
-                                    {s['excerpt']}…
-                                </div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
 
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": answer,
-            "sources": sources,
-        })
-        history.save_message(st.session_state.conversation_id, "assistant", answer, sources=sources)
+            # Save first so we have a message id to attach feedback buttons to
+            assistant_message_id = history.save_message(
+                st.session_state.conversation_id, "assistant", answer, sources=sources
+            )
+            new_message = {
+                "role": "assistant",
+                "content": answer,
+                "sources": sources,
+                "id": assistant_message_id,
+            }
+            st.session_state.messages.append(new_message)
+
+            if sources:
+                render_sources(sources)
+
+            render_feedback_buttons(new_message)
 
 if not st.session_state.messages:
     st.info(

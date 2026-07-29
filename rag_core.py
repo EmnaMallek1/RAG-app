@@ -479,7 +479,21 @@ def load_reranker(log=print):
 
 
 def retrieve_and_rerank(query, vectorstore, reranker, top_k=FINAL_TOP_K, pool_size=RETRIEVAL_POOL_SIZE):
-    retriever = vectorstore.as_retriever(search_kwargs={"k": pool_size})
+    # MMR (Maximal Marginal Relevance) instead of plain similarity search:
+    # plain similarity can let one topically-dominant paper crowd out other
+    # genuinely relevant ones (e.g. a "LoRA vs QLoRA" question can end up
+    # retrieving ONLY QLoRA chunks, since QLoRA's paper also discusses LoRA
+    # extensively and can out-score LoRA's own paper on pure similarity).
+    # MMR explicitly balances relevance with diversity among the retrieved
+    # chunks, giving other relevant papers a real chance to surface too.
+    retriever = vectorstore.as_retriever(
+        search_type="mmr",
+        search_kwargs={
+            "k": pool_size,
+            "fetch_k": pool_size * 3,
+            "lambda_mult": 0.5,  # 0 = max diversity, 1 = pure similarity; 0.5 balances both
+        },
+    )
     prefixed_query = BGE_QUERY_INSTRUCTION + query
     candidates = retriever.invoke(prefixed_query)
 
@@ -546,6 +560,19 @@ Rules you MUST follow:
     END of the sentence or clause it supports, after the content, not interrupting it. Bad:
     "QLoRA, as discussed in [Paper], builds upon LoRA by quantizing..." Good: "QLoRA builds upon
     LoRA by quantizing the model to 4-bit precision [Paper]."
+
+3d. If a single claim or sentence is genuinely supported by MORE THAN ONE paper at once, combine
+    them into ONE bracket citation, separated by a semicolon and space:
+    `[Paper A; Paper B]`. NEVER write two separate brackets stacked back-to-back like
+    `[Paper A] [Paper B]` — that reads as a formatting error, not a real distinction between
+    sources. Only combine papers that both genuinely support that exact claim — do not pad a
+    citation with an extra paper "just in case."
+
+3e. Every citation must point to the paper where that SPECIFIC claim actually appears — not
+    merely a paper that appears somewhere among the sources. Before writing a citation, check
+    which numbered source excerpt the claim's specific facts came from, and cite that paper, not
+    a different one that happens to be topically related. A citation naming the wrong paper for
+    a claim is worse than no citation at all.
 
 4. Use Markdown formatting to aid readability: **bold** key terms or paper names, use bullet lists
    only per rule 2b. Never produce a sequence of disconnected, choppy sentences stitched from
@@ -663,10 +690,22 @@ Rules you MUST follow:
 4b. Citations belong at the END of a block of consecutive sentences drawn from the same paper —
     not repeated after each sentence, and not placed at the start of the block. If the draft
     already places a citation after every sentence for the same paper, collapse those into a
-    single citation at the end of that block. If the whole answer only cites one paper, it should
-    appear exactly once, at the very end of the answer. Do NOT collapse citations that belong to
-    genuinely different papers — each distinct paper still gets its own citation at the end of
-    its own block.
+    single citation at the end of that block, BUT ONLY if doing so does not strip the ONLY
+    citation away from a sentence that has no other citation covering it — never leave a claim
+    completely uncited just to reduce repetition. If the whole answer only cites one paper and
+    every sentence is genuinely part of one continuous block, it should appear exactly once, at
+    the very end. Do NOT collapse citations that belong to genuinely different papers — each
+    distinct paper still gets its own citation at the end of its own block.
+
+4c. If the draft has two or more citation brackets stacked back-to-back with nothing but
+    whitespace between them (e.g. `[Paper A] [Paper B]`), combine them into a single bracket
+    separated by a semicolon: `[Paper A; Paper B]`.
+
+4d. For every citation in the draft, check it against the numbered source excerpts and confirm it
+    names the CORRECT paper for that specific claim — not merely a paper that appears somewhere
+    in the provided context. If a claim's facts actually come from a different numbered excerpt
+    than the one cited, correct the citation to the right paper. A wrong citation is a factual
+    error and must be fixed like any other unsupported claim.
 
 5. Preserve any LaTeX math formatting exactly as given (`$...$` or `$$...$$`). Do not convert
    equations into plain text, and do not strip the dollar-sign delimiters.
@@ -688,7 +727,7 @@ Rules you MUST follow:
 def verify_and_correct_answer(draft_answer, context, api_keys, log=print):
     """Second LLM pass: re-reads the generated answer against the full
     source excerpts and removes/rewrites any claim not literally grounded
-    in the context (e.g. invented examples or details)."""
+    in the context (e.g. invented examples, details, or wrong citations)."""
     verification_message = f"""Source excerpts:
 
 {context}
@@ -705,59 +744,33 @@ Rewrite the draft answer following your fact-checking rules."""
     ], api_keys, log=log)
 
 
-def _collapse_repeated_citations(text: str) -> str:
-    """Removes redundant repeated citations. If the same [Paper Name] citation
-    appears several times in a row with nothing else cited in between, only
-    the LAST occurrence is kept and the earlier ones are stripped out. This
-    is done in code rather than left to the LLM's prompt-following, since
-    that instruction alone doesn't get followed 100% of the time.
+def _merge_adjacent_citations(text: str) -> str:
+    """If two or more citation brackets appear back-to-back with nothing
+    but whitespace between them (e.g. "...models [CLIP] [ViT]."), merges
+    them into a single combined bracket ("...models [CLIP; ViT]."), since
+    stacking separate brackets like that reads as a formatting glitch, not
+    a real distinction between sources.
 
-    Only citations sitting at the true END of a sentence (immediately
-    followed by . ! ? or the end of the text) are ever removed — a citation
-    embedded mid-sentence (e.g. "as discussed in [X], builds upon...") is
-    left untouched, since removing it would break the sentence's grammar.
+    This ONLY touches citations with literally nothing but whitespace
+    between them — it never removes a citation that has real sentence
+    content attached to it, so it can never strand a claim with no
+    attribution (unlike the old cross-sentence "collapse" approach, which
+    could and did — see the code comment history / report for the bug this
+    replaced).
     """
-    matches = list(re.finditer(r"\[([^\]]+)\]", text))
-    if len(matches) < 2:
-        return text
+    pattern = re.compile(r"\[[^\]]+\](?:\s*\[[^\]]+\])+")
 
-    def is_sentence_final(m):
-        idx = m.end()
-        while idx < len(text) and text[idx] == " ":
-            idx += 1
-        return idx >= len(text) or text[idx] in ".!?"
+    def _merge(match):
+        names = re.findall(r"\[([^\]]+)\]", match.group(0))
+        flat = []
+        for n in names:
+            for part in n.split(";"):
+                part = part.strip()
+                if part and part not in flat:
+                    flat.append(part)
+        return "[" + "; ".join(flat) + "]"
 
-    remove_spans = []
-    i = 0
-    while i < len(matches):
-        if not is_sentence_final(matches[i]):
-            i += 1
-            continue
-        j = i
-        while (
-            j + 1 < len(matches)
-            and matches[j + 1].group(1) == matches[i].group(1)
-            and is_sentence_final(matches[j + 1])
-        ):
-            j += 1
-        if j > i:
-            for k in range(i, j):
-                remove_spans.append(matches[k].span())
-        i = j + 1
-
-    if not remove_spans:
-        return text
-
-    result = text
-    for start, end in sorted(remove_spans, reverse=True):
-        s = start
-        if s > 0 and result[s - 1] == " ":
-            s -= 1  # also eat the space before it, avoid a double space
-        result = result[:s] + result[end:]
-
-    result = re.sub(r"\s+([.,;:])", r"\1", result)  # fix space-before-punctuation
-    result = re.sub(r" {2,}", " ", result)           # collapse any double spaces
-    return result
+    return pattern.sub(_merge, text)
 
 
 def _build_sources(reranked_results, allowed_paper_names=None):
@@ -790,6 +803,8 @@ def _build_sources(reranked_results, allowed_paper_names=None):
         entry["pages_display"] = ", ".join(pages_sorted) if pages_sorted else None
         del entry["pages"]
         sources.append(entry)
+
+    sources.sort(key=lambda s: s["score"], reverse=True)
     return sources
 
 
@@ -821,22 +836,45 @@ Answer using only the context above, citing sources as [Paper Name]."""
     if verify:
         final_answer = verify_and_correct_answer(final_answer, context, api_keys, log=log)
 
-    final_answer = _collapse_repeated_citations(final_answer)
+    final_answer = _merge_adjacent_citations(final_answer)
 
-    # Only report sources whose paper actually got cited (as "[Paper Name]") in the
-    # final answer — otherwise this always shows top_k regardless of what the model
-    # actually used, which is misleading (e.g. "5 sources used" for a single-paper answer).
-    cited_paper_names = set()
-    for doc, score in reranked_results:
-        paper_name = doc.metadata.get("paper_name", doc.metadata.get("title", "unknown"))
-        if f"[{paper_name}]" in final_answer:
-            cited_paper_names.add(paper_name)
+    # Only report sources whose paper actually got cited in the final answer —
+    # otherwise this always shows top_k regardless of what the model actually
+    # used, which is misleading (e.g. "5 sources used" for a single-paper
+    # answer). Citations can be combined ("[Paper A; Paper B]"), so parse out
+    # each individual paper name from every bracket rather than a simple
+    # substring check. Track first-appearance ORDER too, since that order
+    # becomes the reference numbering below.
+    ordered_cited_names = []
+    for raw_group in re.findall(r"\[([^\]]+)\]", final_answer):
+        for name in raw_group.split(";"):
+            name = name.strip()
+            if name and name not in ordered_cited_names:
+                ordered_cited_names.append(name)
 
-    sources = _build_sources(reranked_results, allowed_paper_names=cited_paper_names or None)
+    sources = _build_sources(reranked_results, allowed_paper_names=set(ordered_cited_names) or None)
 
     # Fallback: if for some reason no citation matched literally (formatting drift),
     # don't silently show zero sources — fall back to the full retrieved set.
     if not sources:
         sources = _build_sources(reranked_results, allowed_paper_names=None)
+
+    # Turn repeated full-name citations into short numbered references —
+    # [Attention Is All You Need] appearing 4 times in one answer is visually
+    # heavy; [1] appearing 4 times, with the source list below spelling out
+    # what [1] is, reads far more like a real paper and far less repetitive,
+    # without removing a single citation's worth of grounding.
+    paper_to_number = {name: i + 1 for i, name in enumerate(ordered_cited_names)}
+
+    def _numbered(match):
+        names = [n.strip() for n in match.group(1).split(";") if n.strip()]
+        numbers = [str(paper_to_number.get(n, "?")) for n in names]
+        return "[" + ",".join(numbers) + "]"
+
+    final_answer = re.sub(r"\[([^\]]+)\]", _numbered, final_answer)
+
+    for s in sources:
+        s["number"] = paper_to_number.get(s["paper_name"])
+    sources.sort(key=lambda s: s["number"] if s["number"] is not None else 999)
 
     return final_answer, sources
