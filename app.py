@@ -262,6 +262,13 @@ st.markdown(
             border-radius: 10px;
             margin-bottom: 0.6rem;
         }
+        /* The bold "[1] Paper Name" line inside a source card had no
+           explicit color, so it inherited Streamlit's own text-color
+           variable — which the config.toml theme lock now keeps light,
+           but this is a belt-and-suspenders explicit override too. */
+        .source-card strong {
+            color: #111827 !important;
+        }
         .source-score {
             display: inline-block;
             padding: 0.05rem 0.5rem;

@@ -1,0 +1,13 @@
+[theme]
+# Locks Streamlit's own built-in theming (captions, slider/toggle labels,
+# default text color, etc.) to light mode. Without this, Streamlit reads
+# the device/browser's system dark-mode preference and swaps its internal
+# text-color variable to a light color meant for a dark background — which
+# is invisible against this app's light background. Custom CSS in app.py
+# only covers elements we explicitly styled; this config covers every
+# built-in Streamlit widget/label/caption at once.
+base = "light"
+primaryColor = "#6B7280"
+backgroundColor = "#F8F9FC"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#111827"
