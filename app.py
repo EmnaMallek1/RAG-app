@@ -12,6 +12,7 @@ Run with:
 """
 
 import os
+import secrets
 import streamlit as st
 
 import rag_core as rc
@@ -24,6 +25,40 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+# =========================================================
+# Lightweight session persistence
+# ---------------------------------------------------------
+# st.session_state is wiped on every full page reload/refresh — that's
+# normal Streamlit behavior, not a bug, but it means a refresh always
+# bounces the user back to the login page. To survive a refresh, we store
+# a random session token in the URL's query params (which DOES survive a
+# reload, since the browser keeps the same URL) and look it up server-side
+# in an in-memory store to restore the login state.
+#
+# Note: this store lives in the app process's memory. If the Streamlit
+# Cloud container restarts (sleep/redeploy), all active sessions are
+# cleared and everyone has to log in again — but a normal page refresh no
+# longer logs anyone out, which was the actual problem being fixed here.
+# =========================================================
+@st.cache_resource
+def _session_store():
+    return {}  # token -> {"email": ..., "name": ...}
+
+
+def _create_session(email, name):
+    token = secrets.token_urlsafe(24)
+    _session_store()[token] = {"email": email, "name": name}
+    return token
+
+
+def _get_session(token):
+    return _session_store().get(token)
+
+
+def _destroy_session(token):
+    _session_store().pop(token, None)
 
 
 # =========================================================
@@ -77,6 +112,16 @@ st.markdown(
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
+        /* Force the LIGHT color scheme regardless of the device/browser's
+           system dark mode setting. Without this, phones in dark mode make
+           Chrome auto-invert/auto-darken form controls and default text
+           colors on top of our own light-theme CSS, which is what was
+           washing out (making invisible) the chat input and message text
+           on mobile. */
+        html, body, .stApp, [data-testid="stAppViewContainer"] {
+            color-scheme: light only;
+        }
+
         html, body, [class*="css"] {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         }
@@ -114,8 +159,13 @@ st.markdown(
         }
         [data-testid="stChatInput"] textarea {
             background: white !important;
+            color: #111827 !important;
             border-radius: 12px !important;
             border: 1px solid var(--border-color) !important;
+        }
+        [data-testid="stChatInput"] textarea::placeholder {
+            color: #6B7280 !important;
+            opacity: 1 !important;
         }
 
         .brand-header {
@@ -161,6 +211,8 @@ st.markdown(
             margin-bottom: -0.6rem;
         }
         .auth-card [data-testid="stTextInput"] input {
+            background: white !important;
+            color: #111827 !important;
             border-radius: 8px !important;
             padding: 0.45rem 0.7rem !important;
             font-size: 0.9rem !important;
@@ -196,6 +248,11 @@ st.markdown(
             border-radius: 12px;
             padding: 0.75rem 1rem;
             margin-bottom: 0.6rem;
+        }
+        [data-testid="stChatMessage"] p,
+        [data-testid="stChatMessage"] li,
+        [data-testid="stChatMessage"] span {
+            color: #111827 !important;
         }
 
         .source-card {
@@ -277,9 +334,13 @@ def render_login_page():
             else:
                 success, name, message = auth.verify_user(email, password)
                 if success:
+                    clean_email = email.strip().lower()
+                    token = _create_session(clean_email, name)
                     st.session_state.authenticated = True
-                    st.session_state.user_email = email.strip().lower()
+                    st.session_state.user_email = clean_email
                     st.session_state.user_name = name
+                    st.session_state.session_token = token
+                    st.query_params["session"] = token
                     st.rerun()
                 else:
                     st.error(message)
@@ -316,6 +377,19 @@ def render_login_page():
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
+# Try to restore the session from the URL's query param — this is what
+# survives a page refresh, since session_state itself gets wiped but the
+# browser keeps the same URL (and therefore the same "session" param).
+if not st.session_state.authenticated:
+    token_from_url = st.query_params.get("session")
+    if token_from_url:
+        session_data = _get_session(token_from_url)
+        if session_data:
+            st.session_state.authenticated = True
+            st.session_state.user_email = session_data["email"]
+            st.session_state.user_name = session_data["name"]
+            st.session_state.session_token = token_from_url
+
 if not st.session_state.authenticated:
     render_login_page()
     st.stop()
@@ -342,7 +416,11 @@ with st.sidebar:
     st.caption(f"Signed in as **{st.session_state.get('user_name', '')}**")
     st.caption(st.session_state.get("user_email", ""))
     if st.button("Log out", use_container_width=True):
-        for key in ("authenticated", "user_email", "user_name"):
+        token = st.session_state.get("session_token")
+        if token:
+            _destroy_session(token)
+        st.query_params.clear()
+        for key in ("authenticated", "user_email", "user_name", "session_token"):
             st.session_state.pop(key, None)
         st.rerun()
 

@@ -478,24 +478,93 @@ def load_reranker(log=print):
     return CrossEncoder("BAAI/bge-reranker-base")
 
 
+# =========================================================
+# Query decomposition: guarantee both papers surface in comparison questions
+# ---------------------------------------------------------
+# MMR helps diversity, but doesn't GUARANTEE that two named papers both get
+# retrieved — one can still crowd out the other (e.g. QLoRA's paper also
+# discusses LoRA extensively, so a "LoRA vs QLoRA" query can still end up
+# retrieving only QLoRA chunks on pure similarity/MMR). When a question
+# explicitly names 2+ known papers, we instead run a SEPARATE, filtered
+# retrieval pass per named paper, guaranteeing each has real representation
+# in the candidate pool before reranking — rather than hoping the general
+# search surfaces both.
+# =========================================================
+_PAPER_KEYWORDS = {
+    "QLoRA": "QLoRA: Efficient Finetuning of Quantized LLMs",
+    "LoRA": "LoRA: Low-Rank Adaptation of Large Language Models",
+    "BERT": "BERT: Pre-training of Deep Bidirectional Transformers",
+    "GPT-4": "GPT-4 Technical Report",
+    "GPT-3": "GPT-3: Language Models are Few-Shot Learners",
+    "InstructGPT": "InstructGPT: Training with Human Feedback",
+    "LLaMA": "LLaMA: Open and Efficient Foundation Language Models",
+    "PaLM": "PaLM: Scaling Language Modeling with Pathways",
+    "T5": "T5: Exploring the Limits of Transfer Learning",
+    "ResNet": "ResNet: Deep Residual Learning for Image Recognition",
+    "ViT": "Vision Transformer (ViT)",
+    "Vision Transformer": "Vision Transformer (ViT)",
+    "CLIP": "CLIP: Learning Transferable Visual Models",
+    "GAN": "GAN: Generative Adversarial Networks",
+    "VAE": "VAE: Auto-Encoding Variational Bayes",
+    "DDPM": "DDPM: Denoising Diffusion Probabilistic Models",
+    "Stable Diffusion": "Stable Diffusion: High-Resolution Latent Diffusion Models",
+    "DPR": "DPR: Dense Passage Retrieval",
+    "AlphaGo": "AlphaZero (AlphaGo family)",
+    "AlphaZero": "AlphaZero (AlphaGo family)",
+    "PPO": "PPO: Proximal Policy Optimization",
+    "DQN": "DQN: Playing Atari with Deep Reinforcement Learning",
+    "Word2Vec": "Word2Vec: Efficient Estimation of Word Representations",
+    "Dropout": "Dropout: Preventing Overfitting",
+    "Adam": "Adam: A Method for Stochastic Optimization",
+    "Chain-of-Thought": "Chain-of-Thought Prompting",
+}
+
+
+def _detect_mentioned_papers(query):
+    """Returns the list of known papers explicitly named in the query
+    (e.g. "LoRA vs QLoRA" -> both papers), in first-mention order."""
+    mentioned = []
+    for keyword, paper_name in _PAPER_KEYWORDS.items():
+        if re.search(rf"\b{re.escape(keyword)}\b", query, re.IGNORECASE):
+            if paper_name not in mentioned:
+                mentioned.append(paper_name)
+    return mentioned
+
+
 def retrieve_and_rerank(query, vectorstore, reranker, top_k=FINAL_TOP_K, pool_size=RETRIEVAL_POOL_SIZE):
-    # MMR (Maximal Marginal Relevance) instead of plain similarity search:
-    # plain similarity can let one topically-dominant paper crowd out other
-    # genuinely relevant ones (e.g. a "LoRA vs QLoRA" question can end up
-    # retrieving ONLY QLoRA chunks, since QLoRA's paper also discusses LoRA
-    # extensively and can out-score LoRA's own paper on pure similarity).
-    # MMR explicitly balances relevance with diversity among the retrieved
-    # chunks, giving other relevant papers a real chance to surface too.
+    prefixed_query = BGE_QUERY_INSTRUCTION + query
+    candidates = []
+    seen_content = set()
+
+    def _add(docs):
+        for d in docs:
+            key = d.page_content[:200]  # de-dupe if the same chunk surfaces twice
+            if key not in seen_content:
+                seen_content.add(key)
+                candidates.append(d)
+
+    mentioned_papers = _detect_mentioned_papers(query)
+    if len(mentioned_papers) >= 2:
+        # Guarantee each explicitly-named paper gets its own retrieval pass
+        # (filtered to just that paper), so neither can crowd the other out.
+        per_paper_k = max(pool_size // len(mentioned_papers), 4)
+        for paper_name in mentioned_papers:
+            paper_retriever = vectorstore.as_retriever(
+                search_kwargs={"k": per_paper_k, "filter": {"paper_name": paper_name}},
+            )
+            _add(paper_retriever.invoke(prefixed_query))
+
+    # Always also run the normal broad MMR retrieval — covers everything
+    # else relevant, including questions that don't name specific papers.
     retriever = vectorstore.as_retriever(
         search_type="mmr",
         search_kwargs={
             "k": pool_size,
             "fetch_k": pool_size * 3,
-            "lambda_mult": 0.5,  # 0 = max diversity, 1 = pure similarity; 0.5 balances both
+            "lambda_mult": 0.5,
         },
     )
-    prefixed_query = BGE_QUERY_INSTRUCTION + query
-    candidates = retriever.invoke(prefixed_query)
+    _add(retriever.invoke(prefixed_query))
 
     if not candidates:
         return []
