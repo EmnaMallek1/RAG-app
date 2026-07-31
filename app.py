@@ -572,19 +572,33 @@ with st.sidebar:
             is_active = conv["id"] == st.session_state.get("conversation_id")
             label = ("🟢 " if is_active else "") + conv["title"]
 
-            col_load, col_delete = st.columns([5, 1])
+            col_load, col_menu = st.columns([5, 1])
             with col_load:
                 if st.button(label, key=f"conv_{conv['id']}", use_container_width=True):
                     st.session_state.conversation_id = conv["id"]
                     st.session_state.messages = history.load_messages(conv["id"])
                     st.rerun()
-            with col_delete:
-                if st.button("🗑", key=f"del_{conv['id']}", use_container_width=True):
-                    history.delete_conversation(conv["id"])
-                    if is_active:
-                        st.session_state.conversation_id = None
-                        st.session_state.messages = []
-                    st.rerun()
+            with col_menu:
+                with st.popover("⋮", use_container_width=True):
+                    new_title = st.text_input(
+                        "Rename conversation",
+                        value=conv["title"],
+                        key=f"rename_input_{conv['id']}",
+                    )
+                    col_rename, col_delete = st.columns(2)
+                    with col_rename:
+                        if st.button("Rename", key=f"rename_btn_{conv['id']}", use_container_width=True):
+                            if history.rename_conversation(conv["id"], new_title):
+                                st.rerun()
+                            else:
+                                st.error("Title can't be empty.")
+                    with col_delete:
+                        if st.button("Delete", key=f"del_{conv['id']}", use_container_width=True):
+                            history.delete_conversation(conv["id"])
+                            if is_active:
+                                st.session_state.conversation_id = None
+                                st.session_state.messages = []
+                            st.rerun()
 
     st.divider()
     with st.expander("📄 Indexed papers"):

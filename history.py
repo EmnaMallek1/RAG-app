@@ -175,6 +175,23 @@ def load_messages(conversation_id: str) -> list[dict]:
     return messages
 
 
+def rename_conversation(conversation_id: str, new_title: str):
+    """Renames an existing conversation. Title is trimmed and capped at
+    60 chars, same as the auto-generated title on creation."""
+    _ensure_tables()
+    conn = _get_connection()
+
+    new_title = (new_title or "").strip()[:60]
+    if not new_title:
+        return False
+
+    conn.execute_query(
+        "UPDATE conversations SET title = ? WHERE id = ?",
+        [new_title, conversation_id],
+    )
+    return True
+
+
 def delete_conversation(conversation_id: str):
     """Deletes a conversation and all of its messages."""
     _ensure_tables()
