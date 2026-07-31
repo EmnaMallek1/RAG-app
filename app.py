@@ -434,6 +434,21 @@ def render_reset_password_page(token):
 
     st.markdown('<div class="auth-card">', unsafe_allow_html=True)
 
+    # If we already successfully reset the password for this token in a
+    # previous rerun, don't re-verify the token — it's now marked "used"
+    # in the database (by design, so it can't be replayed), so re-checking
+    # it here would incorrectly show "invalid or expired" the moment the
+    # user interacts with anything on this success screen (e.g. clicking
+    # "Go to sign in" itself triggers a rerun, which would hit that check).
+    if st.session_state.get("reset_done_token") == token:
+        st.success("Your password has been reset. You can now sign in with your new password.")
+        if st.button("Go to sign in", use_container_width=True):
+            st.session_state.pop("reset_done_token", None)
+            st.query_params.clear()
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
     email = auth.verify_reset_token(token)
 
     if not email:
@@ -461,10 +476,12 @@ def render_reset_password_page(token):
             else:
                 success, message = auth.reset_password(token, new_password)
                 if success:
-                    st.success(message)
-                    if st.button("Go to sign in", use_container_width=True):
-                        st.query_params.clear()
-                        st.rerun()
+                    # Mark success in session_state and rerun immediately —
+                    # the next run of this function takes the branch above,
+                    # showing a clean success screen without re-verifying
+                    # the now-used token.
+                    st.session_state["reset_done_token"] = token
+                    st.rerun()
                 else:
                     st.error(message)
 
