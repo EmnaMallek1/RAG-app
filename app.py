@@ -352,6 +352,28 @@ def render_login_page():
                 else:
                     st.error(message)
 
+        with st.expander("Forgot password?"):
+            forgot_email = st.text_input(
+                "Email", key="forgot_password_email", placeholder="you@example.com",
+            )
+            if st.button("Send reset link", key="send_reset_link_button"):
+                if not forgot_email:
+                    st.error("Please enter your email.")
+                else:
+                    app_url = st.secrets.get("APP_URL", "")
+                    if not app_url:
+                        st.error(
+                            "APP_URL is not configured — the app owner needs to set it "
+                            "in secrets.toml (e.g. https://yourapp.streamlit.app)."
+                        )
+                    else:
+                        with st.spinner("Sending..."):
+                            success, message = auth.request_password_reset(forgot_email, app_url)
+                        if success:
+                            st.success(message)
+                        else:
+                            st.error(message)
+
     with tab_signup:
         st.markdown('<div class="auth-title">Create your account</div>', unsafe_allow_html=True)
         st.markdown('<div class="auth-subtitle">It only takes a minute</div>', unsafe_allow_html=True)
@@ -381,8 +403,85 @@ def render_login_page():
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def render_reset_password_page(token):
+    """Shown instead of the normal login page when the URL contains a
+    ?reset_token=... param (i.e. the user clicked the link from their
+    reset email)."""
+    st.markdown(
+        """
+        <style>
+            [data-testid="stBottomBlockContainer"],
+            [data-testid="stBottom"] {
+                display: none !important;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div class="brand-header" style="justify-content:center; margin-top:1rem;">
+            <span style="font-size:1.8rem;">📚</span>
+            <span class="brand-title">ML Research Assistant</span>
+        </div>
+        <div class="brand-subtitle" style="text-align:center; margin-bottom: 0.5rem;">
+            Choose a new password
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="auth-card">', unsafe_allow_html=True)
+
+    email = auth.verify_reset_token(token)
+
+    if not email:
+        st.error("This reset link is invalid or has expired. Please request a new one from the sign-in page.")
+        if st.button("Back to sign in", use_container_width=True):
+            st.query_params.clear()
+            st.rerun()
+    else:
+        st.markdown(f'<div class="auth-title">Resetting password for</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="auth-subtitle">{email}</div>', unsafe_allow_html=True)
+
+        with st.form("reset_password_form"):
+            new_password = st.text_input(
+                "New password", type="password", key="reset_new_password",
+                help="At least 8 characters.",
+            )
+            confirm_password = st.text_input(
+                "Confirm new password", type="password", key="reset_confirm_password",
+            )
+            submitted = st.form_submit_button("Reset password", use_container_width=True)
+
+        if submitted:
+            if new_password != confirm_password:
+                st.error("Passwords do not match.")
+            else:
+                success, message = auth.reset_password(token, new_password)
+                if success:
+                    st.success(message)
+                    if st.button("Go to sign in", use_container_width=True):
+                        st.query_params.clear()
+                        st.rerun()
+                else:
+                    st.error(message)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
+
+# If the URL carries a password-reset token (i.e. the user clicked the
+# link from their reset email), show the reset-password page instead of
+# anything else — this takes priority even if the browser happens to
+# still have an active login session.
+reset_token_from_url = st.query_params.get("reset_token")
+if reset_token_from_url:
+    render_reset_password_page(reset_token_from_url)
+    st.stop()
 
 # Try to restore the session from the URL's query param — this is what
 # survives a page refresh, since session_state itself gets wiped but the
