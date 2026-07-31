@@ -192,6 +192,8 @@ st.markdown(
             --text-main: %(text)s;
             --panel-bg: %(panel)s;
             --panel-alt-bg: %(panel_alt)s;
+            --input-bg: %(input_bg)s;
+            --input-text: %(input_text)s;
         }
 
         .stApp {
@@ -372,6 +374,42 @@ st.markdown(
         }
         div.stButton > button p, div.stFormSubmitButton > button p {
             color: white !important;
+        }
+
+        /* ---- Popover ("⋮" menu next to each conversation) ----
+           st.popover isn't a plain st.button, so it wasn't covered by the
+           div.stButton rules above and kept Streamlit's default white
+           look — while its text could still pick up our "light text
+           everywhere" rules, making it invisible on that white background.
+           Style both the trigger button and the floating panel content
+           explicitly so they follow the active theme. */
+        [data-testid="stPopover"] button {
+            background-color: var(--brand-primary) !important;
+            border-radius: 8px !important;
+            border: none !important;
+        }
+        [data-testid="stPopover"] button p,
+        [data-testid="stPopover"] button span {
+            color: white !important;
+        }
+        [data-testid="stPopoverBody"] {
+            background: var(--panel-bg) !important;
+            border: 1px solid var(--border-color) !important;
+            border-radius: 10px !important;
+        }
+        [data-testid="stPopoverBody"] p,
+        [data-testid="stPopoverBody"] span,
+        [data-testid="stPopoverBody"] label,
+        [data-testid="stPopoverBody"] div {
+            color: var(--text-main) !important;
+        }
+        [data-testid="stPopoverBody"] input {
+            background: #FFFFFF !important;
+            color: #111827 !important;
+            -webkit-text-fill-color: #111827 !important;
+            caret-color: #111827 !important;
+            border: 1px solid var(--border-color) !important;
+            border-radius: 8px !important;
         }
 
         /* Sidebar polish */
