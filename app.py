@@ -7,6 +7,17 @@ Chroma (local), Groq (free LLM with a free API key).
 
 Includes a simple email/password authentication gate (see auth.py).
 
+Theme:
+    The whole app (sidebar, chat, sources, forms - everything) now supports
+    two themes:
+      - "dark"  (default): the starfield background, used app-wide, with
+        light text so everything stays readable.
+      - "light": the original plain light look.
+    A small toggle at the very top of every page lets the user switch
+    between them at any time; the choice is kept in st.session_state so it
+    persists across reruns (but not across a full server restart, same as
+    everything else in session_state).
+
 Run with:
     streamlit run app.py
 """
@@ -105,22 +116,66 @@ def get_groq_api_keys():
 GROQ_API_KEYS = get_groq_api_keys()
 
 # =========================================================
-# Global styling — professional look & feel
+# Theme state — default is DARK (starfield, app-wide).
+# Switching to "light" restores the original plain look everywhere.
+# =========================================================
+if "theme_mode" not in st.session_state:
+    st.session_state.theme_mode = "dark"
+
+THEMES = {
+    "light": {
+        "bg": "#F8F9FC",
+        "panel": "#FFFFFF",
+        "panel_alt": "#FAFAFC",
+        "border": "#E5E7EB",
+        "text": "#111827",
+        "text_muted": "#6B7280",
+        "input_bg": "#FFFFFF",
+        "input_text": "#111827",
+        "placeholder": "#6B7280",
+        "primary": "#6B7280",
+        "primary_dark": "#4B5563",
+        "badge_bg": "#EEF2FF",
+        "badge_text": "#4B5563",
+        "sidebar_bg": "#FFFFFF",
+        "header_title": "#1E1B4B",
+        "auth_card_bg": "#FFFFFF",
+        "header_bg": "#FFFFFF",
+        "stars_opacity": "0",
+    },
+    "dark": {
+        "bg": "#0b1026",
+        "panel": "rgba(255, 255, 255, 0.06)",
+        "panel_alt": "rgba(255, 255, 255, 0.04)",
+        "border": "rgba(255, 255, 255, 0.18)",
+        "text": "#F8F9FC",
+        "text_muted": "#C7CCE6",
+        "input_bg": "rgba(255, 255, 255, 0.10)",
+        "input_text": "#F8F9FC",
+        "placeholder": "#AEB4D6",
+        "primary": "#818CF8",
+        "primary_dark": "#6366F1",
+        "badge_bg": "rgba(129, 140, 248, 0.20)",
+        "badge_text": "#E0E3FF",
+        "sidebar_bg": "rgba(11, 16, 38, 0.88)",
+        "header_title": "#F8F9FC",
+        "auth_card_bg": "rgba(20, 26, 53, 0.85)",
+        "header_bg": "#0b1026",
+        "stars_opacity": "1",
+    },
+}
+
+_theme = THEMES[st.session_state.theme_mode]
+
+# =========================================================
+# Global styling — built from the active theme's color palette so the
+# ENTIRE app (sidebar, chat, sources, forms, everything) follows whichever
+# mode is selected, not just the login screen.
 # =========================================================
 st.markdown(
     """
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-
-        /* Force the LIGHT color scheme regardless of the device/browser's
-           system dark mode setting. Without this, phones in dark mode make
-           Chrome auto-invert/auto-darken form controls and default text
-           colors on top of our own light-theme CSS, which is what was
-           washing out (making invisible) the chat input and message text
-           on mobile. */
-        html, body, .stApp, [data-testid="stAppViewContainer"] {
-            color-scheme: light only;
-        }
 
         html, body, [class*="css"] {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -129,23 +184,46 @@ st.markdown(
         #MainMenu, footer {visibility: hidden;}
 
         :root {
-            --brand-primary: #6B7280;
-            --brand-primary-dark: #4B5563;
-            --brand-bg: #F8F9FC;
-            --border-color: #E5E7EB;
-            --text-muted: #6B7280;
+            --brand-primary: %(primary)s;
+            --brand-primary-dark: %(primary_dark)s;
+            --brand-bg: %(bg)s;
+            --border-color: %(border)s;
+            --text-muted: %(text_muted)s;
+            --text-main: %(text)s;
+            --panel-bg: %(panel)s;
+            --panel-alt-bg: %(panel_alt)s;
         }
 
         .stApp {
             background-color: var(--brand-bg);
         }
 
+        /* ---- FIX 1: the top Streamlit header/toolbar was always white,
+           regardless of theme. Give it the same background as the app so
+           it blends in instead of showing as a white bar. ---- */
+        [data-testid="stHeader"] {
+            background-color: %(header_bg)s !important;
+            background: %(header_bg)s !important;
+        }
+        [data-testid="stHeader"]::before {
+            background: %(header_bg)s !important;
+        }
+        [data-testid="stToolbar"] {
+            background-color: transparent !important;
+        }
+        [data-testid="stDecoration"] {
+            background-image: none !important;
+            background-color: %(header_bg)s !important;
+        }
+
         /* Remove Streamlit's default extra bottom padding that leaves a
            dead empty gap below the last element */
         .block-container {
-            padding-top: 2rem;
+            padding-top: 0.5rem;
             padding-bottom: 1rem;
             max-width: 1100px;
+            position: relative;
+            z-index: 1; /* sits above the starfield */
         }
 
         /* Fix the default white bar behind the chat input so it blends
@@ -157,15 +235,52 @@ st.markdown(
             border-top: none !important;
             box-shadow: none !important;
         }
-        [data-testid="stChatInput"] textarea {
-            background: white !important;
+
+        /* ---- FIX 2: text typed into the chat box was invisible in dark
+           mode. Setting `color` alone isn't always enough — Streamlit/the
+           browser can apply -webkit-text-fill-color, which wins over a
+           plain `color` declaration. Force both, on every selector variant
+           that might match the underlying textarea, and also fix the
+           caret so the cursor itself is visible. ---- */
+        /* NOTE: the chat input's actual rendered background stays white
+           in both themes (Streamlit/baseweb keeps its own white textarea
+           under the hood, ignoring our translucent input_bg here), so the
+           text color must be a fixed dark color too — using the
+           theme-dependent input_text (white in dark mode) made the typed
+           text invisible on that white box. Hardcode dark text here
+           instead of following the theme. */
+        [data-testid="stChatInput"] textarea,
+        [data-testid="stChatInputTextArea"],
+        [data-testid="stChatInput"] textarea:focus,
+        [data-testid="stChatInput"] textarea:not(:placeholder-shown) {
+            background: #FFFFFF !important;
             color: #111827 !important;
+            -webkit-text-fill-color: #111827 !important;
+            caret-color: #111827 !important;
             border-radius: 12px !important;
             border: 1px solid var(--border-color) !important;
         }
         [data-testid="stChatInput"] textarea::placeholder {
             color: #6B7280 !important;
+            -webkit-text-fill-color: #6B7280 !important;
             opacity: 1 !important;
+        }
+
+        /* ---- Generic text readability, app-wide ----
+           Streamlit's own widgets (captions, labels, markdown) don't know
+           about our custom background, so in dark mode we explicitly make
+           all of this light-colored. In light mode this just restores the
+           original dark-on-white text. */
+        .stApp, .stApp p, .stApp li, .stApp span, .stApp label,
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stCaptionContainer"],
+        [data-testid="stCaptionContainer"] p,
+        [data-testid="stWidgetLabel"] p,
+        [data-testid="stExpander"] summary span,
+        [data-testid="stSidebar"] p,
+        [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] label {
+            color: var(--text-main);
         }
 
         .brand-header {
@@ -177,11 +292,21 @@ st.markdown(
         .brand-title {
             font-weight: 700;
             font-size: 1.5rem;
-            color: #1E1B4B;
+            color: %(header_title)s;
         }
         .brand-subtitle {
             color: var(--text-muted);
             font-size: 0.92rem;
+        }
+
+        /* ---- Theme toggle, top of every page ---- */
+        .theme-toggle-row {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: -0.5rem;
+        }
+        .theme-toggle-row [data-testid="stWidgetLabel"] p {
+            color: var(--text-main) !important;
         }
 
         /* Auth card — smaller, tighter, centered */
@@ -189,15 +314,17 @@ st.markdown(
             max-width: 340px;
             margin: 1.5rem auto 0 auto;
             padding: 1.5rem 1.5rem 1.25rem 1.5rem;
-            background: white;
+            background: %(auth_card_bg)s;
             border-radius: 14px;
             border: 1px solid var(--border-color);
-            box-shadow: 0 4px 20px rgba(17, 24, 39, 0.06);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+            position: relative;
+            z-index: 1; /* sits above the animated stars */
         }
         .auth-title {
             font-weight: 700;
             font-size: 1.15rem;
-            color: #111827;
+            color: var(--text-main);
             margin-bottom: 0.1rem;
         }
         .auth-subtitle {
@@ -211,15 +338,24 @@ st.markdown(
             margin-bottom: -0.6rem;
         }
         .auth-card [data-testid="stTextInput"] input {
-            background: white !important;
-            color: #111827 !important;
+            background: %(input_bg)s !important;
+            color: %(input_text)s !important;
+            -webkit-text-fill-color: %(input_text)s !important;
             border-radius: 8px !important;
             padding: 0.45rem 0.7rem !important;
             font-size: 0.9rem !important;
+            border: 1px solid var(--border-color) !important;
+        }
+        .auth-card [data-testid="stTextInput"] input::placeholder {
+            color: %(placeholder)s !important;
+            opacity: 1 !important;
         }
         .auth-card [data-testid="stForm"] {
             border: none !important;
             padding: 0 !important;
+        }
+        .auth-card [data-testid="stExpander"] {
+            background: var(--panel-alt-bg);
         }
 
         div.stButton > button, div.stFormSubmitButton > button {
@@ -227,54 +363,62 @@ st.markdown(
             font-weight: 600;
             border: none;
             background-color: var(--brand-primary);
-            color: white;
+            color: white !important;
             transition: background-color 0.15s ease;
         }
         div.stButton > button:hover, div.stFormSubmitButton > button:hover {
             background-color: var(--brand-primary-dark);
-            color: white;
+            color: white !important;
+        }
+        div.stButton > button p, div.stFormSubmitButton > button p {
+            color: white !important;
         }
 
         /* Sidebar polish */
         [data-testid="stSidebar"] {
-            background-color: #FFFFFF;
+            background-color: %(sidebar_bg)s;
             border-right: 1px solid var(--border-color);
+        }
+        [data-testid="stSidebar"] > div {
+            position: relative;
+            z-index: 1; /* sits above the starfield */
         }
 
         /* Chat message bubbles */
         [data-testid="stChatMessage"] {
-            background: white;
+            background: var(--panel-bg);
             border: 1px solid var(--border-color);
             border-radius: 12px;
             padding: 0.75rem 1rem;
             margin-bottom: 0.6rem;
+            position: relative;
+            z-index: 1;
         }
         [data-testid="stChatMessage"] p,
         [data-testid="stChatMessage"] li,
         [data-testid="stChatMessage"] span {
-            color: #111827 !important;
+            color: var(--text-main) !important;
         }
 
         .source-card {
             padding: 0.85rem 1rem;
-            background: #FAFAFC;
+            background: var(--panel-alt-bg);
             border: 1px solid var(--border-color);
             border-radius: 10px;
             margin-bottom: 0.6rem;
         }
-        /* The bold "[1] Paper Name" line inside a source card had no
-           explicit color, so it inherited Streamlit's own text-color
-           variable — which the config.toml theme lock now keeps light,
-           but this is a belt-and-suspenders explicit override too. */
         .source-card strong {
-            color: #111827 !important;
+            color: var(--text-main) !important;
+        }
+        .source-card div {
+            color: var(--text-muted) !important;
         }
         .source-score {
             display: inline-block;
             padding: 0.05rem 0.5rem;
             border-radius: 6px;
-            background: #EEF2FF;
-            color: var(--brand-primary-dark);
+            background: %(badge_bg)s;
+            color: %(badge_text)s;
             font-size: 0.78rem;
             font-weight: 600;
         }
@@ -283,12 +427,270 @@ st.markdown(
         [data-testid="stExpander"] {
             border: 1px solid var(--border-color);
             border-radius: 10px;
-            background: white;
+            background: var(--panel-bg);
+            position: relative;
+            z-index: 1;
+        }
+
+        [data-testid="stAlert"] {
+            position: relative;
+            z-index: 1;
+        }
+
+        /* =====================================================
+           Animated star background — used app-wide whenever dark mode is
+           active (login page, reset page, AND the authenticated app:
+           sidebar, chat, everything). It's a fixed, full-screen layer
+           behind all content (z-index: 0), so every other panel above
+           simply needs z-index: 1 to sit on top of it, which is already
+           handled by the rules above.
+
+           Two independent pieces:
+             1) `.stars-container` — the original full-width layers
+                (.stars/.stars2/.stars3/.stars4), spread across the whole
+                screen.
+             2) `.stars-right-container` — an EXTRA layer anchored to the
+                right edge of the viewport (`right: 0`, fixed width), so
+                there's always a denser, visible cluster of stars on the
+                right no matter how wide the screen is.
+           ===================================================== */
+        .stars-container {
+            position: fixed;
+            inset: 0;
+            z-index: 0;
+            overflow: hidden;
+            background: linear-gradient(180deg, #0b1026 0%%, #141a35 100%%);
+            opacity: %(stars_opacity)s;
+            pointer-events: none;
+        }
+
+        .stars-right-container {
+            position: fixed;
+            top: 0;
+            right: 0;
+            width: 420px;
+            height: 100%%;
+            z-index: 0;
+            overflow: hidden;
+            opacity: %(stars_opacity)s;
+            pointer-events: none;
+        }
+
+        .stars, .stars2, .stars3, .stars4,
+        .stars-r1, .stars-r2, .stars-r3 {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 1px;
+            height: 1px;
+            background: transparent;
+        }
+
+        .stars {
+            box-shadow:
+                173px 924px #fff, 811px 12px #fff, 55px 431px #fff, 909px 271px #fff,
+                390px 611px #fff, 22px 780px #fff, 640px 90px #fff, 300px 500px #fff,
+                750px 340px #fff, 120px 150px #fff, 480px 820px #fff, 900px 600px #fff,
+                60px 60px #fff, 250px 950px #fff, 700px 700px #fff, 15px 300px #fff,
+                850px 450px #fff, 400px 100px #fff, 550px 900px #fff, 100px 500px #fff,
+                980px 820px #fff, 40px 90px #fff, 620px 430px #fff, 260px 60px #fff,
+                760px 980px #fff, 890px 100px #fff, 200px 700px #fff, 330px 330px #fff,
+                45px 620px #fff, 510px 40px #fff, 670px 560px #fff, 940px 900px #fff,
+                160px 260px #fff, 820px 780px #fff, 380px 870px #fff, 720px 210px #fff;
+            animation: animStar 60s linear infinite;
+        }
+        .stars:after {
+            content: " ";
+            position: absolute;
+            top: 1000px;
+            width: 1px;
+            height: 1px;
+            background: transparent;
+            box-shadow: inherit;
+        }
+
+        .stars2 {
+            box-shadow:
+                200px 100px #fff, 500px 300px #fff, 800px 700px #fff, 100px 900px #fff,
+                650px 50px #fff, 350px 650px #fff, 900px 400px #fff, 50px 250px #fff,
+                750px 850px #fff, 450px 450px #fff, 970px 220px #fff, 20px 620px #fff,
+                280px 780px #fff, 610px 920px #fff, 860px 60px #fff, 130px 400px #fff;
+            width: 2px;
+            height: 2px;
+            animation: animStar 100s linear infinite;
+        }
+        .stars2:after {
+            content: " ";
+            position: absolute;
+            top: 1000px;
+            width: 2px;
+            height: 2px;
+            background: transparent;
+            box-shadow: inherit;
+        }
+
+        .stars3 {
+            box-shadow:
+                300px 200px #fff, 700px 600px #fff, 100px 800px #fff, 850px 150px #fff,
+                500px 900px #fff, 950px 500px #fff, 60px 480px #fff, 420px 40px #fff,
+                220px 920px #fff, 780px 320px #fff;
+            width: 3px;
+            height: 3px;
+            animation: animStar 150s linear infinite;
+        }
+        .stars3:after {
+            content: " ";
+            position: absolute;
+            top: 1000px;
+            width: 3px;
+            height: 3px;
+            background: transparent;
+            box-shadow: inherit;
+        }
+
+        /* Extra sparse, larger, slow-drifting layer for a bit more depth */
+        .stars4 {
+            box-shadow:
+                90px 150px #fff, 430px 730px #fff, 610px 210px #fff, 860px 900px #fff,
+                260px 500px #fff, 940px 60px #fff;
+            width: 2px;
+            height: 2px;
+            opacity: 0.7;
+            animation: animStar 200s linear infinite;
+        }
+        .stars4:after {
+            content: " ";
+            position: absolute;
+            top: 1000px;
+            width: 2px;
+            height: 2px;
+            background: transparent;
+            box-shadow: inherit;
+        }
+
+        /* ---- FIX 3: extra stars concentrated on the right side.
+           These live inside `.stars-right-container` (fixed width 420px,
+           anchored to the right edge), so their x-coordinates only need
+           to span 0-420px to always sit near the right of the screen,
+           on any monitor size. Three layers, different sizes/speeds for
+           parallax depth, denser than the main layers. ---- */
+        .stars-r1 {
+            box-shadow:
+                20px 80px #fff, 60px 240px #fff, 10px 400px #fff, 90px 60px #fff,
+                140px 320px #fff, 30px 560px #fff, 180px 140px #fff, 70px 700px #fff,
+                220px 480px #fff, 15px 860px #fff, 260px 200px #fff, 110px 920px #fff,
+                300px 40px #fff, 45px 640px #fff, 340px 780px #fff, 190px 900px #fff,
+                380px 100px #fff, 250px 620px #fff, 400px 340px #fff, 130px 460px #fff;
+            animation: animStar 55s linear infinite;
+        }
+        .stars-r1:after {
+            content: " ";
+            position: absolute;
+            top: 1000px;
+            width: 1px;
+            height: 1px;
+            background: transparent;
+            box-shadow: inherit;
+        }
+
+        .stars-r2 {
+            box-shadow:
+                50px 120px #fff, 150px 500px #fff, 250px 800px #fff, 350px 200px #fff,
+                80px 640px #fff, 200px 60px #fff, 320px 460px #fff, 20px 300px #fff,
+                290px 920px #fff, 120px 900px #fff;
+            width: 2px;
+            height: 2px;
+            animation: animStar 90s linear infinite;
+        }
+        .stars-r2:after {
+            content: " ";
+            position: absolute;
+            top: 1000px;
+            width: 2px;
+            height: 2px;
+            background: transparent;
+            box-shadow: inherit;
+        }
+
+        .stars-r3 {
+            box-shadow:
+                100px 180px #fff, 260px 620px #fff, 40px 860px #fff, 370px 60px #fff,
+                180px 940px #fff, 320px 340px #fff;
+            width: 3px;
+            height: 3px;
+            opacity: 0.8;
+            animation: animStar 140s linear infinite;
+        }
+        .stars-r3:after {
+            content: " ";
+            position: absolute;
+            top: 1000px;
+            width: 3px;
+            height: 3px;
+            background: transparent;
+            box-shadow: inherit;
+        }
+
+        @keyframes animStar {
+            from { transform: translateY(0px); }
+            to   { transform: translateY(-1000px); } /* stars drift upward */
         }
     </style>
-    """,
+    """ % _theme,
     unsafe_allow_html=True,
 )
+
+
+def render_stars_background():
+    """Injects the fixed, full-screen animated starfield, PLUS a dedicated
+    right-edge cluster (`.stars-right-container`) for a denser, always-
+    visible group of stars on the right side of the screen. Called once
+    per run, near the top, whenever dark mode is active — both containers
+    sit behind every page (login, reset, and the authenticated app) since
+    they're position: fixed with z-index: 0, and every panel on top
+    already has z-index: 1. In light mode both render with opacity 0, so
+    they're effectively invisible and the app looks exactly like the
+    original plain light theme."""
+    st.markdown(
+        """
+        <div class="stars-container">
+            <div class="stars"></div>
+            <div class="stars2"></div>
+            <div class="stars3"></div>
+            <div class="stars4"></div>
+        </div>
+        <div class="stars-right-container">
+            <div class="stars-r1"></div>
+            <div class="stars-r2"></div>
+            <div class="stars-r3"></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_theme_toggle():
+    """Small light/dark toggle shown at the top of every page (login,
+    reset-password, and the main authenticated app). Flipping it just
+    updates st.session_state.theme_mode and reruns — all the styling
+    above reacts automatically since it's built from THEMES[theme_mode]."""
+    st.markdown('<div class="theme-toggle-row">', unsafe_allow_html=True)
+    is_dark = st.session_state.theme_mode == "dark"
+    new_is_dark = st.toggle(
+        "🌙 Dark" if is_dark else "☀️ Light",
+        value=is_dark,
+        key="theme_mode_toggle_widget",
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+    if new_is_dark != is_dark:
+        st.session_state.theme_mode = "dark" if new_is_dark else "light"
+        st.rerun()
+
+
+# Starfield sits behind absolutely everything on the page, on every run.
+render_stars_background()
+# Toggle is the very first interactive element on every page.
+render_theme_toggle()
 
 
 # =========================================================
@@ -311,11 +713,11 @@ def render_login_page():
 
     st.markdown(
         """
-        <div class="brand-header" style="justify-content:center; margin-top:1rem;">
+        <div class="brand-header" style="justify-content:center; margin-top:1rem; position:relative; z-index:1;">
             <span style="font-size:1.8rem;">📚</span>
             <span class="brand-title">ML Research Assistant</span>
         </div>
-        <div class="brand-subtitle" style="text-align:center; margin-bottom: 0.5rem;">
+        <div class="brand-subtitle" style="text-align:center; margin-bottom: 0.5rem; position:relative; z-index:1;">
             Your research assistant for foundational machine learning papers
         </div>
         """,
@@ -421,11 +823,11 @@ def render_reset_password_page(token):
 
     st.markdown(
         """
-        <div class="brand-header" style="justify-content:center; margin-top:1rem;">
+        <div class="brand-header" style="justify-content:center; margin-top:1rem; position:relative; z-index:1;">
             <span style="font-size:1.8rem;">📚</span>
             <span class="brand-title">ML Research Assistant</span>
         </div>
-        <div class="brand-subtitle" style="text-align:center; margin-bottom: 0.5rem;">
+        <div class="brand-subtitle" style="text-align:center; margin-bottom: 0.5rem; position:relative; z-index:1;">
             Choose a new password
         </div>
         """,
@@ -690,7 +1092,7 @@ def render_sources(sources):
                 <div class="source-card">
                     <strong>{badge} {s['paper_name']}</strong>
                     {pages_html}
-                    <div style="color:#6B7280; font-size:0.85rem; margin-top:0.4rem;">
+                    <div style="font-size:0.85rem; margin-top:0.4rem;">
                         {s['excerpt']}…
                     </div>
                 </div>
