@@ -47,6 +47,7 @@ Cross-Encoder Reranking
 Llama 3.3 70B
        ↓
 Answer + Sources
+```
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
