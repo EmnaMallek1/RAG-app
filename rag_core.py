@@ -661,7 +661,8 @@ Rules you MUST follow:
    inline math (e.g. `$\\theta_{t+1} = \\theta_t - \\alpha \\cdot g_t$`) or double dollar signs for
    standalone/display equations (e.g. `$$\\theta_{t+1} = \\theta_t - \\frac{\\alpha}{\\sqrt{v_t} + \\epsilon} m_t$$`).
    Never write formulas as plain unformatted text with concatenated symbols — always use proper
-   LaTeX subscript (`_`), superscript (`^`), and fraction (`\\frac{}{}`) notation.
+   LaTeX subscript (`_`), superscript (`^`), and fraction (`\\frac{}{}`) notation. This applies
+   inside table cells too.
 
 10. Be concise: clear and complete, but no generic filler or repetition.
 """
@@ -700,7 +701,9 @@ def _invoke_with_fallback(messages, api_keys, log=print):
             llm = ChatGroq(
                 model="openai/gpt-oss-120b",
                 temperature=0,
-                max_tokens=1024,
+                max_tokens=2048,
+                reasoning_effort="low",
+                reasoning_format="hidden",
                 groq_api_key=key,
             )
             response = llm.invoke(messages)
@@ -740,6 +743,19 @@ Rules you MUST follow:
    or rephrase it to only state what IS explicitly supported. Do not soften it into a hedge like
    "possibly" — just remove unsupported specifics.
 
+1b. EXCEPTION for standard mathematical formulas: PDF-to-text extraction frequently garbles LaTeX
+    and mathematical notation into broken/unparseable characters, so a formula may look "missing"
+    from the source excerpts even though it's the same relationship described in the surrounding
+    prose. Do NOT strip a formula just because it isn't verbatim in the source text, AS LONG AS it
+    is a standard, well-known restatement of a method already explained in the draft's own prose
+    (e.g. the low-rank update $\\Delta W = BA$ for a method described as injecting matrices A and
+    B). Only remove a formula if it introduces a genuinely new numeric claim not backed by the
+    prose around it.
+
+1c. NEVER leave a citation bracket dangling with no supporting content directly before it. If you
+    remove a sentence, formula, or clause immediately preceding a `[Paper Name]` citation, also
+    remove that citation — unless something else earlier in the same block still justifies it.
+
 2. Do NOT remove or flag general, unifying explanatory sentences (e.g. "an encoder is a component
    that transforms an input into a representation") as long as they are a fair, accurate summary of
    what the sources collectively describe — these are not "unsupported claims", they are legitimate
@@ -776,8 +792,9 @@ Rules you MUST follow:
     than the one cited, correct the citation to the right paper. A wrong citation is a factual
     error and must be fixed like any other unsupported claim.
 
-5. Preserve any LaTeX math formatting exactly as given (`$...$` or `$$...$$`). Do not convert
-   equations into plain text, and do not strip the dollar-sign delimiters.
+5. Preserve any LaTeX math formatting exactly as given (`$...$` or `$$...$$`), including inside
+   table cells. Do not convert equations into plain text, and do not strip the dollar-sign
+   delimiters.
 
 6. Do not add any new information that wasn't in the draft or the sources.
 

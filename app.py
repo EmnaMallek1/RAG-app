@@ -27,6 +27,7 @@ import secrets
 import streamlit as st
 
 import rag_core as rc
+import agent_core
 import auth
 import history
 
@@ -434,8 +435,32 @@ st.markdown(
         }
         [data-testid="stChatMessage"] p,
         [data-testid="stChatMessage"] li,
-        [data-testid="stChatMessage"] span {
+        [data-testid="stChatMessage"] span,
+        [data-testid="stChatMessage"] td,
+        [data-testid="stChatMessage"] th,
+        [data-testid="stChatMessage"] table,
+        [data-testid="stChatMessage"] div,
+        [data-testid="stChatMessage"] h1,
+        [data-testid="stChatMessage"] h2,
+        [data-testid="stChatMessage"] h3,
+        [data-testid="stChatMessage"] h4,
+        [data-testid="stChatMessage"] strong,
+        [data-testid="stChatMessage"] em,
+        [data-testid="stChatMessage"] code {
             color: var(--text-main) !important;
+        }
+        /* Table borders/background also follow the theme, so cells don't
+           blend into a mismatched default white/gray table style. */
+        [data-testid="stChatMessage"] table {
+            border-collapse: collapse;
+        }
+        [data-testid="stChatMessage"] td,
+        [data-testid="stChatMessage"] th {
+            border: 1px solid var(--border-color) !important;
+            padding: 0.4rem 0.6rem;
+        }
+        [data-testid="stChatMessage"] th {
+            background: var(--panel-alt-bg);
         }
 
         .source-card {
@@ -1176,7 +1201,7 @@ if prompt:
         with st.chat_message("assistant"):
             with st.spinner("Searching the corpus and generating the answer..."):
                 try:
-                    answer, sources = rc.generate_answer(
+                    answer, sources = agent_core.generate_answer_agentic(
                         prompt, vectorstore, reranker, GROQ_API_KEYS,
                         top_k=top_k, verify=verify_answers,
                     )
