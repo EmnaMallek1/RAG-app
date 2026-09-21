@@ -794,7 +794,8 @@ Rules you MUST follow:
 
 5. Preserve any LaTeX math formatting exactly as given (`$...$` or `$$...$$`), including inside
    table cells. Do not convert equations into plain text, and do not strip the dollar-sign
-   delimiters.
+   delimiters. If you encounter `\\[...\\]` or `\\(...\\)` delimiters (which Streamlit cannot
+   render), convert them to `$$...$$` / `$...$` respectively rather than leaving them as-is.
 
 6. Do not add any new information that wasn't in the draft or the sources.
 

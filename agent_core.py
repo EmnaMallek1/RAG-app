@@ -29,8 +29,20 @@ import unicodedata
 
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langfuse import get_client
+from langfuse.langchain import CallbackHandler
 
 import rag_core as rc
+
+langfuse = get_client()  # reads LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL from env
+
+# A citation bracket "[...]" but NOT "\[...\]" -- the latter is LaTeX display-math
+# delimiter syntax some models use instead of "$$...$$". Without the negative
+# lookbehind/lookahead here, a stray "\[ ... \]" equation gets misread as a
+# citation (its content doesn't match any paper, but it still steals a number
+# slot from the real citations) -- this is exactly what happened when the model
+# wrote "\[ \Delta W = BA \]" instead of "$$\Delta W = BA$$".
+_CITATION_BRACKET_RE = re.compile(r"(?<!\\)\[([^\]]+)(?<!\\)\]")
 
 MAX_ITERATIONS = 5          # hard safety cap so the model can't loop forever
 DEFAULT_TOP_K = rc.FINAL_TOP_K
@@ -79,7 +91,7 @@ def _canonicalize_citations(text):
 
     Any OTHER unmatched (non-numeric) bracket content is kept as-is, so a
     genuine mismatch stays visible rather than being silently hidden."""
-    pattern = re.compile(r"\[([^\]]+)\]")
+    pattern = _CITATION_BRACKET_RE
 
     def _replace(match):
         names = [n.strip() for n in match.group(1).split(";") if n.strip()]
@@ -137,8 +149,9 @@ Rules:
      bibliography (e.g. "...as shown in [1]..."). These are NOT citations to your
      source papers -- never copy a bare number like [1] or [2] into your answer.
 6. Answer in the same language as the user's question.
-7. Use LaTeX ($...$ or $$...$$) for any math, including inside table cells — it's fine there
-   as long as it's the same notation style you'd use elsewhere.
+7. Use LaTeX ONLY with dollar-sign delimiters: `$...$` for inline math, `$$...$$` for display/
+   standalone equations. NEVER use `\\[...\\]` or `\\(...\\)` as math delimiters -- Streamlit does
+   not render those, and they will visibly break the citation numbering.
 """
 
 TOOLS = [
@@ -241,9 +254,11 @@ def _is_rate_limit_error(e):
     return "rate_limit_exceeded" in msg or "429" in msg or "rate limit" in msg.lower()
 
 
-def _invoke_agent_step(messages, api_keys, log=print):
+def _invoke_agent_step(messages, api_keys, log=print, callbacks=None):
     if not api_keys:
         raise ValueError("No GROQ_API_KEY configured.")
+
+    invoke_config = {"callbacks": callbacks} if callbacks else {}
 
     last_error = None
     for i, key in enumerate(api_keys):
@@ -256,7 +271,7 @@ def _invoke_agent_step(messages, api_keys, log=print):
                 reasoning_format="hidden",
                 groq_api_key=key,
             ).bind_tools(TOOLS)
-            return llm.invoke(messages)
+            return llm.invoke(messages, config=invoke_config)
         except Exception as e:
             last_error = e
             if _is_rate_limit_error(e):
@@ -299,42 +314,57 @@ def generate_answer_agentic(query, vectorstore, reranker, api_keys, top_k=DEFAUL
 
     final_text = None
 
-    for iteration in range(MAX_ITERATIONS):
-        response = _invoke_agent_step(messages, api_keys, log=log)
-        messages.append(response)
+    # Everything inside this span (every LLM call, every tool call) shows up as ONE
+    # trace in Langfuse for this question, instead of scattered separate traces.
+    with langfuse.start_as_current_observation(
+        as_type="span", name="rag-agent-question", input=query
+    ) as root_span:
+        langfuse_handler = CallbackHandler()
 
-        if not response.tool_calls:
+        for iteration in range(MAX_ITERATIONS):
+            response = _invoke_agent_step(messages, api_keys, log=log, callbacks=[langfuse_handler])
+            messages.append(response)
+
+            if not response.tool_calls:
+                final_text = response.content
+                log(f"Model answered directly after {iteration} search(es).")
+                break
+
+            for call in response.tool_calls:
+                args = call["args"]
+                log(f"Tool call: search_papers(query={args.get('query')!r}, "
+                    f"paper_filter={args.get('paper_filter')!r})")
+
+                context_text, reranked, next_source_index = _search_papers_tool(
+                    args.get("query", query),
+                    vectorstore, reranker,
+                    source_map, next_source_index,
+                    paper_filter=args.get("paper_filter"),
+                    top_k=top_k,
+                )
+                all_reranked_results.extend(reranked)
+
+                messages.append(ToolMessage(content=context_text, tool_call_id=call["id"]))
+        else:
+            # Loop hit MAX_ITERATIONS without the model stopping itself.
+            log("Max iterations reached -- forcing a final answer.")
+            messages.append(HumanMessage(
+                content="You've reached the search limit. Answer now with what you have, "
+                        "or say explicitly that the papers don't cover this."
+            ))
+            response = _invoke_agent_step(messages, api_keys, log=log, callbacks=[langfuse_handler])
             final_text = response.content
-            log(f"Model answered directly after {iteration} search(es).")
-            break
 
-        for call in response.tool_calls:
-            args = call["args"]
-            log(f"Tool call: search_papers(query={args.get('query')!r}, "
-                f"paper_filter={args.get('paper_filter')!r})")
+        root_span.update(output=final_text)
 
-            context_text, reranked, next_source_index = _search_papers_tool(
-                args.get("query", query),
-                vectorstore, reranker,
-                source_map, next_source_index,
-                paper_filter=args.get("paper_filter"),
-                top_k=top_k,
-            )
-            all_reranked_results.extend(reranked)
-
-            messages.append(ToolMessage(content=context_text, tool_call_id=call["id"]))
-    else:
-        # Loop hit MAX_ITERATIONS without the model stopping itself.
-        log("Max iterations reached -- forcing a final answer.")
-        messages.append(HumanMessage(
-            content="You've reached the search limit. Answer now with what you have, "
-                    "or say explicitly that the papers don't cover this."
-        ))
-        response = _invoke_agent_step(messages, api_keys, log=log)
-        final_text = response.content
+    langfuse.flush()  # Streamlit requests are short-lived -- make sure data is actually sent
 
     if final_text is None:
         final_text = "I could not produce an answer."
+
+    log("=== DEBUG: raw draft from the agent loop (before any post-processing) ===")
+    log(final_text)
+    log("=== END raw draft ===")
 
     # Safety net: rewrite any "[Source N]" / "【Source N】" the model slipped in,
     # despite instructions, back into "[Paper Name]" -- BEFORE verification, so
@@ -343,6 +373,10 @@ def generate_answer_agentic(query, vectorstore, reranker, api_keys, top_k=DEFAUL
     # Then fix up typography (special hyphens, etc.) so citation text exactly
     # matches the real paper names -- see _canonicalize_citations docstring.
     final_text = _canonicalize_citations(final_text)
+
+    log("=== DEBUG: after normalize + canonicalize, before verification ===")
+    log(final_text)
+    log("=== END pre-verification ===")
 
     deduped_results = _dedupe_results(all_reranked_results)
 
@@ -353,6 +387,10 @@ def generate_answer_agentic(query, vectorstore, reranker, api_keys, top_k=DEFAUL
     if verify and deduped_results:
         context_for_verification = rc.format_context(deduped_results)
         final_text = rc.verify_and_correct_answer(final_text, context_for_verification, api_keys, log=log)
+
+        log("=== DEBUG: after verification pass ===")
+        log(final_text)
+        log("=== END post-verification ===")
 
         # rc.format_context numbers 1..k for THIS call specifically (it doesn't
         # know about the agent loop's running numbers), so if the fact-checker
@@ -370,7 +408,7 @@ def generate_answer_agentic(query, vectorstore, reranker, api_keys, top_k=DEFAUL
     # Same citation -> numbered-source logic as rag_core.generate_answer,
     # just reused here since the output format is identical.
     ordered_cited_names = []
-    for raw_group in re.findall(r"\[([^\]]+)\]", final_text):
+    for raw_group in _CITATION_BRACKET_RE.findall(final_text):
         for name in raw_group.split(";"):
             name = name.strip()
             if name and name not in ordered_cited_names:
@@ -387,7 +425,7 @@ def generate_answer_agentic(query, vectorstore, reranker, api_keys, top_k=DEFAUL
         numbers = [str(paper_to_number.get(n, "?")) for n in names]
         return "[" + ",".join(numbers) + "]"
 
-    final_text = re.sub(r"\[([^\]]+)\]", _numbered, final_text)
+    final_text = _CITATION_BRACKET_RE.sub(_numbered, final_text)
 
     for s in sources:
         s["number"] = paper_to_number.get(s["paper_name"])
