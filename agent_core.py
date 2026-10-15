@@ -78,40 +78,52 @@ _PAPER_NAME_LOOKUP = {_normalize_for_matching(name): name for name in rc.PAPER_T
 _BARE_NUMBER_CITATION = re.compile(r"^\d+(\s*,\s*\d+)*$")
 
 
+_KNOWN_PAPER_NAMES = set(rc.PAPER_TITLES.values())
+
+
+def _normalize_math_delimiters(text):
+    """Streamlit only renders "$...$" and "$$...$$". Some models write LaTeX with
+    "\\[...\\]" (display) or "\\(...\\)" (inline) instead, which show up as raw
+    text. Convert them to dollar-sign delimiters."""
+    text = re.sub(r"\\\[(.+?)\\\]", lambda m: "$$" + m.group(1).strip() + "$$", text, flags=re.DOTALL)
+    text = re.sub(r"\\\((.+?)\\\)", lambda m: "$" + m.group(1).strip() + "$", text, flags=re.DOTALL)
+    return text
+
+
 def _canonicalize_citations(text):
-    """Rewrites every "[...]" citation bracket so its paper name(s) exactly match
+    """Rewrites citation brackets "[Paper Name]" so the name exactly matches
     rc.PAPER_TITLES, regardless of typographic variants the model introduced.
 
-    Also strips bare numeric brackets like "[1]" or "[2]" that match no known
-    paper: these are almost always citation numbers LEAKED from the original
-    paper's own bibliography inside a retrieved excerpt (e.g. "...as shown in
-    [1]...") that the model accidentally carried over while paraphrasing --
-    not an actual citation it intended to make. Left in place, they'd steal a
-    number slot from the real citations and throw off the source list.
+    Only brackets that actually name a known paper are treated as citations.
+    Everything else is left untouched -- in particular square brackets that are
+    part of math or code, like E[g^2] or x[0], which must never be mistaken for
+    a citation.
 
-    Any OTHER unmatched (non-numeric) bracket content is kept as-is, so a
-    genuine mismatch stays visible rather than being silently hidden."""
-    pattern = _CITATION_BRACKET_RE
+    The one exception: a bare numeric bracket like "[1]" standing on its own
+    (preceded by whitespace/punctuation, not attached to a symbol) is almost
+    always a bibliography number LEAKED from a retrieved excerpt, so it is
+    dropped; otherwise it would steal a number slot from the real citations."""
 
     def _replace(match):
         names = [n.strip() for n in match.group(1).split(";") if n.strip()]
-        canonical_names = []
+        known = []
         for name in names:
             canonical = _PAPER_NAME_LOOKUP.get(_normalize_for_matching(name))
-            if canonical:
-                if canonical not in canonical_names:
-                    canonical_names.append(canonical)
-            elif _BARE_NUMBER_CITATION.match(name):
-                continue  # leaked bibliography number -- drop it silently
-            elif name not in canonical_names:
-                canonical_names.append(name)
+            if canonical and canonical not in known:
+                known.append(canonical)
 
-        if not canonical_names:
-            return ""  # the whole bracket was noise -- remove it entirely
+        if known:
+            return "[" + "; ".join(known) + "]"
 
-        return "[" + "; ".join(canonical_names) + "]"
+        if _BARE_NUMBER_CITATION.match(match.group(1).strip()):
+            start = match.start()
+            prev = match.string[start - 1] if start > 0 else " "
+            if prev.isspace() or prev in ".,;:!?)":
+                return ""  # leaked bibliography number
+        return match.group(0)  # not a citation (math, code, ...): leave as-is
 
-    return pattern.sub(_replace, text)
+    return _CITATION_BRACKET_RE.sub(_replace, text)
+
 
 # =========================================================
 # What the model is told: its instructions + its one tool
@@ -369,6 +381,7 @@ def generate_answer_agentic(query, vectorstore, reranker, api_keys, top_k=DEFAUL
     # Safety net: rewrite any "[Source N]" / "【Source N】" the model slipped in,
     # despite instructions, back into "[Paper Name]" -- BEFORE verification, so
     # the fact-checker (and everything downstream) sees clean, correct citations.
+    final_text = _normalize_math_delimiters(final_text)
     final_text = _normalize_source_citations(final_text, source_map)
     # Then fix up typography (special hyphens, etc.) so citation text exactly
     # matches the real paper names -- see _canonicalize_citations docstring.
@@ -400,6 +413,7 @@ def generate_answer_agentic(query, vectorstore, reranker, api_keys, top_k=DEFAUL
             i + 1: doc.metadata.get("paper_name", doc.metadata.get("title", "unknown"))
             for i, (doc, _score) in enumerate(deduped_results)
         }
+        final_text = _normalize_math_delimiters(final_text)
         final_text = _normalize_source_citations(final_text, verification_map)
         final_text = _canonicalize_citations(final_text)
 
@@ -411,7 +425,7 @@ def generate_answer_agentic(query, vectorstore, reranker, api_keys, top_k=DEFAUL
     for raw_group in _CITATION_BRACKET_RE.findall(final_text):
         for name in raw_group.split(";"):
             name = name.strip()
-            if name and name not in ordered_cited_names:
+            if name in _KNOWN_PAPER_NAMES and name not in ordered_cited_names:
                 ordered_cited_names.append(name)
 
     sources = rc._build_sources(deduped_results, allowed_paper_names=set(ordered_cited_names) or None)
@@ -422,7 +436,9 @@ def generate_answer_agentic(query, vectorstore, reranker, api_keys, top_k=DEFAUL
 
     def _numbered(match):
         names = [n.strip() for n in match.group(1).split(";") if n.strip()]
-        numbers = [str(paper_to_number.get(n, "?")) for n in names]
+        if not names or any(n not in paper_to_number for n in names):
+            return match.group(0)  # not a citation (e.g. E[g^2] in a formula)
+        numbers = [str(paper_to_number[n]) for n in names]
         return "[" + ",".join(numbers) + "]"
 
     final_text = _CITATION_BRACKET_RE.sub(_numbered, final_text)
